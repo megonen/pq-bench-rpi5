@@ -1,0 +1,105 @@
+# =============================================================================
+# pq-bench-rpi5 candidate configuration
+#
+# This file is the single place users edit to extend the benchmark. The harness
+# reads it with a dependency-free YAML subset parser (bench/lib/miniyaml.py), so
+# keep to the simple shape used below: top-level maps, lists of scalars, and
+# lists of "- key: value" maps. Comments (#) and quotes are fine.
+#
+# Algorithm names must match liboqs / oqs-provider identifiers exactly. To see
+# what your built liboqs supports:  ./vendor/liboqs/build/tests/test_kem  (lists)
+# or check the dashboard's "available algorithms" note after a run.
+# =============================================================================
+
+# ---- measurement knobs (overridable on the CLI: ./run.sh --iters 50000) ----
+measurement:
+  warmup_iters: 1000        # untimed iterations to settle caches/branch predictors
+  timed_iters: 10000        # timed iterations per repetition
+  repetitions: 5            # independent repetitions (fresh process each time)
+  cycles_mode: auto         # auto | on | off  (PMU userspace cycle counting)
+
+# ---- KEMs ------------------------------------------------------------------
+# baseline = the classical reference Logos uses TODAY (drawn on every chart).
+kem:
+  baseline:
+    - name: X25519
+      classical: true
+      security_level: 1     # NIST category, for grouping on charts
+  candidates:
+    - name: ML-KEM-512
+      security_level: 1
+    - name: ML-KEM-768
+      security_level: 3
+    - name: ML-KEM-1024
+      security_level: 5
+    # Hybrids (classical + PQ) — these are oqs-provider TLS group names; for the
+    # raw KEM bench they are skipped unless liboqs exposes them as a KEM.
+    - name: X25519MLKEM768
+      security_level: 3
+      hybrid: true
+    - name: SecP256r1MLKEM768
+      security_level: 3
+      hybrid: true
+    # --- extend here, e.g. uncomment if your liboqs build enables them ---
+    # - name: FrodoKEM-640-AES
+    #   security_level: 1
+    # - name: HQC-128
+    #   security_level: 1
+    # - name: Classic-McEliece-348864
+    #   security_level: 1
+
+# ---- Signatures ------------------------------------------------------------
+sig:
+  baseline:
+    - name: Ed25519
+      classical: true
+      security_level: 1
+  candidates:
+    - name: ML-DSA-44
+      security_level: 2
+    - name: ML-DSA-65
+      security_level: 3
+    - name: ML-DSA-87
+      security_level: 5
+    - name: Falcon-512
+      security_level: 1
+    - name: Falcon-1024
+      security_level: 5
+    # SLH-DSA (SPHINCS+) — many parameter sets; a representative spread.
+    - name: SPHINCS+-SHA2-128f-simple
+      security_level: 1
+    - name: SPHINCS+-SHA2-128s-simple
+      security_level: 1
+    - name: SPHINCS+-SHA2-192f-simple
+      security_level: 3
+    - name: SPHINCS+-SHA2-256f-simple
+      security_level: 5
+    # --- extend here ---
+
+# ---- TLS 1.3 handshake matrix ----------------------------------------------
+# The bench runs (kem_group x sig_alg). The classical baseline pair is ALWAYS
+# included as the reference point regardless of what is listed here.
+tls:
+  baseline:
+    kem_group: X25519
+    sig_alg: ed25519        # OpenSSL classical auth Logos uses today
+  # PQ key-exchange groups to test (oqs-provider TLS group names)
+  kem_groups:
+    - X25519MLKEM768
+    - SecP256r1MLKEM768
+    - mlkem512
+    - mlkem768
+    - mlkem1024
+  # PQ signature algorithms for the server/CA cert (oqs-provider names)
+  sig_algs:
+    - mldsa44
+    - mldsa65
+    - mldsa87
+    - falcon512
+    - sphincssha2128fsimple
+  connections: 1000         # handshakes timed against a persistent s_server
+
+# ---- future phase (NOT implemented now — hooks only) -----------------------
+# zk:
+#   snark: []   # e.g. groth16, plonk, halo2
+#   stark: []   # e.g. risc0, winterfell

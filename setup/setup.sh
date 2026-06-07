@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# =============================================================================
+# setup.sh — build + pin the full PQ toolchain from scratch.
+#
+#   ./setup/setup.sh            # everything: deps, liboqs, openssl(if needed), oqs-provider
+#   ./setup/setup.sh liboqs     # just liboqs
+#   ./setup/setup.sh openssl    # just openssl (forced from source)
+#   ./setup/setup.sh provider   # just oqs-provider
+#   ./setup/setup.sh deps       # just OS packages
+#
+# Everything is installed under ./vendor/install (no system pollution). The exact
+# resolved git commits + the optimization flags actually used are written to
+# setup/versions.lock, which run.sh stamps into every results JSON.
+#
+# Identical flags for every candidate: -O3 -mcpu=cortex-a76 on the RPi5. On a
+# non-A76 host (the macOS smoke box) we fall back to -O3 and RECORD that, so
+# smoke-test numbers can never masquerade as the RPi5 baseline.
+# =============================================================================
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+# shellcheck source=setup/lib_platform.sh
+source "$HERE/lib_platform.sh"
+# shellcheck source=setup/versions.env
+source "$HERE/versions.env"
+
+pqb_detect_platform
+
+VENDOR="$ROOT/vendor"
+SRC="$VENDOR/src"
+PREFIX="$VENDOR/install"
+mkdir -p "$SRC" "$PREFIX"
+
+JOBS="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+
+# ---- decide the real optimization flags for THIS host ----------------------
+# We only use -mcpu=cortex-a76 if the compiler accepts it AND we're on aarch64.
+choose_cflags() {
+  local cc="${CC:-cc}" probe="$SRC/.flagprobe.c"
+  echo 'int main(void){return 0;}' > "$probe"
+  if [ "$PQB_ARCH" = "aarch64" ] && $cc $TARGET_CFLAGS_RPI5 "$probe" -o "$probe.out" 2>/dev/null; then
+    BENCH_CFLAGS="$TARGET_CFLAGS_RPI5"; CFLAGS_TARGET="cortex-a76"
+  else
+    BENCH_CFLAGS="$TARGET_CFLAGS_FALLBACK"; CFLAGS_TARGET="generic-fallback"
+  fi
+  rm -f "$probe" "$probe.out"
+}
+
+cc_version_string() {
+  local cc="${CC:-cc}"
+  "$cc" --version 2>/dev/null | head -1
+}
+
+git_pin() { # repo ref destdir
+  local repo="$1" ref="$2" dest="$3"
+  if [ -d "$dest/.git" ]; then
+    pqb_log "updating $(basename "$dest") -> $ref"
+    git -C "$dest" fetch -q --depth 1 origin "$ref" || git -C "$dest" fetch -q --tags origin
+  else
+    pqb_log "cloning $(basename "$dest") @ $ref"
+    git clone -q --depth 1 --branch "$ref" "$repo" "$dest" 2>/dev/null \
+      || git clone -q "$repo" "$dest"
+  fi
+  git -C "$dest" checkout -q "$ref" 2>/dev/null || true
+  git -C "$dest" rev-parse HEAD
+}
+
+# ---------------------------------------------------------------------------
+build_liboqs() {
+  choose_cflags
+  local dest="$SRC/liboqs" commit
+  commit="$(git_pin "$LIBOQS_REPO" "$LIBOQS_REF" "$dest")"
+  pqb_log "building liboqs ($LIBOQS_REF @ ${commit:0:12}) flags: $BENCH_CFLAGS"
+
+  # OQS_DIST_BUILD=OFF -> native build for the fixed target (no runtime CPU
+  # dispatch), so -mcpu=cortex-a76 fully drives codegen. The AArch64-optimized
+  # ML-KEM (mlkem-native) and AArch64 asm backends are enabled by default on
+  # aarch64 when DIST_BUILD is OFF (compile-time CPU features); verified post-build.
+  local GEN=(); command -v ninja >/dev/null 2>&1 && GEN=(-G Ninja)
+  cmake -S "$dest" -B "$dest/build" ${GEN[@]+"${GEN[@]}"} \
+    -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DOQS_DIST_BUILD=OFF \
+    -DOQS_BUILD_ONLY_LIB=OFF \
+    -DBUILD_SHARED_LIBS=ON \
+    -DCMAKE_C_FLAGS="$BENCH_CFLAGS" >/dev/null
+  cmake --build "$dest/build" --parallel "$JOBS" >/dev/null
+  cmake --install "$dest/build" >/dev/null
+
+  # Prove the optimized backend: capture the aarch64/native defines from the
+  # generated build config so versions.lock can show what was actually compiled.
+  local cfg="$dest/build/include/oqs/oqsconfig.h"
+  LIBOQS_OPT_DEFINES="(oqsconfig.h not found)"
+  if [ -r "$cfg" ]; then
+    # strip embedded double-quotes so the value stays valid in versions.lock
+    LIBOQS_OPT_DEFINES="$(grep -Ei 'AARCH64|ARM|_ASM|MLKEM_NATIVE|OPT_TARGET|CPU_EXT' "$cfg" \
+      | grep -i 'define' | sed 's/^#define //' | tr -d '"' | tr '\n' ';' || true)"
+  fi
+  LIBOQS_COMMIT="$commit"
+}
+
+# ---------------------------------------------------------------------------
+locate_or_build_openssl() {
+  # Prefer an existing >= 3.5 openssl (Homebrew on macOS, distro on Linux) unless
+  # BUILD_OPENSSL=1. PQ sig certs for TLS only need >= 3.5.0.
+  local want_major=3 want_minor=5
+  if [ "${1:-}" != "force" ] && [ "${BUILD_OPENSSL:-0}" != 1 ]; then
+    local cand
+    for cand in "$(command -v openssl || true)" /opt/homebrew/opt/openssl@3/bin/openssl /usr/bin/openssl; do
+      [ -x "$cand" ] || continue
+      local v; v="$("$cand" version 2>/dev/null | awk '{print $2}')"
+      local maj="${v%%.*}" rest="${v#*.}" min="${rest%%.*}"
+      if [ "${maj:-0}" -gt "$want_major" ] 2>/dev/null || \
+         { [ "${maj:-0}" -eq "$want_major" ] && [ "${min:-0}" -ge "$want_minor" ]; } 2>/dev/null; then
+        OPENSSL_BIN="$cand"
+        OPENSSL_PREFIX="$(dirname "$(dirname "$cand")")"
+        OPENSSL_COMMIT="system:$v"
+        pqb_log "using existing OpenSSL $v at $cand"
+        return 0
+      fi
+    done
+  fi
+  pqb_log "building OpenSSL $OPENSSL_REF from source"
+  local dest="$SRC/openssl" commit
+  commit="$(git_pin "$OPENSSL_REPO" "$OPENSSL_REF" "$dest")"
+  ( cd "$dest" && ./Configure --prefix="$PREFIX" --openssldir="$PREFIX/ssl" shared \
+      && make -j"$JOBS" >/dev/null && make install_sw >/dev/null )
+  OPENSSL_BIN="$PREFIX/bin/openssl"
+  OPENSSL_PREFIX="$PREFIX"
+  OPENSSL_COMMIT="$commit"
+}
+
+# ---------------------------------------------------------------------------
+build_oqs_provider() {
+  [ -n "${OPENSSL_PREFIX:-}" ] || locate_or_build_openssl
+  local dest="$SRC/oqs-provider" commit
+  commit="$(git_pin "$OQSPROVIDER_REPO" "$OQSPROVIDER_REF" "$dest")"
+  pqb_log "building oqs-provider ($OQSPROVIDER_REF @ ${commit:0:12})"
+  local GEN=(); command -v ninja >/dev/null 2>&1 && GEN=(-G Ninja)
+  cmake -S "$dest" -B "$dest/build" ${GEN[@]+"${GEN[@]}"} \
+    -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DOPENSSL_ROOT_DIR="$OPENSSL_PREFIX" \
+    -Dliboqs_DIR="$PREFIX/lib/cmake/liboqs" \
+    -DCMAKE_C_FLAGS="${BENCH_CFLAGS:-$TARGET_CFLAGS_FALLBACK}" >/dev/null
+  cmake --build "$dest/build" --parallel "$JOBS" >/dev/null
+  cmake --install "$dest/build" >/dev/null 2>&1 || true
+  # Provider .so lands under .../lib/ossl-modules or .../oqsprovider
+  OQSPROVIDER_MODULE="$(find "$PREFIX" "$dest/build" -name 'oqsprovider.*' \( -name '*.so' -o -name '*.dylib' \) 2>/dev/null | head -1)"
+  OQSPROVIDER_COMMIT="$commit"
+}
+
+# ---------------------------------------------------------------------------
+write_lock() {
+  choose_cflags 2>/dev/null || true
+  local lock="$HERE/versions.lock"
+  {
+    echo "# Auto-generated by setup.sh — exact toolchain provenance. Stamped into results JSON."
+    echo "PQB_BUILD_HOST_OS=$PQB_OS"
+    echo "PQB_BUILD_HOST_ARCH=$PQB_ARCH"
+    echo "PQB_IS_RPI=$PQB_IS_RPI"
+    echo "PQB_RPI_MODEL=\"${PQB_RPI_MODEL}\""
+    echo "BENCH_CFLAGS=\"${BENCH_CFLAGS:-unknown}\""
+    echo "CFLAGS_TARGET=\"${CFLAGS_TARGET:-unknown}\""
+    echo "CC_VERSION=\"$(cc_version_string)\""
+    echo "LIBOQS_REF=\"$LIBOQS_REF\""
+    echo "LIBOQS_COMMIT=\"${LIBOQS_COMMIT:-not-built}\""
+    echo "LIBOQS_OPT_DEFINES=\"${LIBOQS_OPT_DEFINES:-}\""
+    echo "OPENSSL_BIN=\"${OPENSSL_BIN:-}\""
+    echo "OPENSSL_PREFIX=\"${OPENSSL_PREFIX:-}\""
+    echo "OPENSSL_COMMIT=\"${OPENSSL_COMMIT:-not-built}\""
+    echo "OQSPROVIDER_REF=\"$OQSPROVIDER_REF\""
+    echo "OQSPROVIDER_COMMIT=\"${OQSPROVIDER_COMMIT:-not-built}\""
+    echo "OQSPROVIDER_MODULE=\"${OQSPROVIDER_MODULE:-}\""
+    echo "PREFIX=\"$PREFIX\""
+  } > "$lock"
+  pqb_log "wrote $lock"
+  cat "$lock" >&2
+}
+
+# ---- dispatch --------------------------------------------------------------
+main() {
+  local what="${1:-all}"
+  case "$what" in
+    deps)     pqb_install_build_deps ;;
+    liboqs)   build_liboqs; write_lock ;;
+    openssl)  locate_or_build_openssl force; write_lock ;;
+    provider) build_oqs_provider; write_lock ;;
+    all)
+      pqb_install_build_deps
+      build_liboqs
+      locate_or_build_openssl
+      build_oqs_provider
+      write_lock
+      pqb_log "setup complete. Next: ./run.sh --smoke"
+      ;;
+    *) pqb_err "unknown target: $what (deps|liboqs|openssl|provider|all)"; exit 2 ;;
+  esac
+}
+main "$@"

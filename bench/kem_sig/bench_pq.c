@@ -1,0 +1,434 @@
+/* ===========================================================================
+ * bench_pq.c — primitive-level KEM / signature benchmark harness.
+ *
+ * One algorithm per invocation (fresh process keeps cache state clean):
+ *   bench_pq --kind kem --alg ML-KEM-768 --warmup 1000 --iters 10000 --reps 5
+ *   bench_pq --kind sig --alg ML-DSA-65  ...
+ *
+ * Emits a single JSON object describing the algorithm to stdout. The orchestrator
+ * (run.sh / assemble.py) wraps these with environment metadata.
+ *
+ * Two backends, selected by algorithm name:
+ *   - liboqs            : all PQ candidates (ML-KEM, ML-DSA, Falcon, SLH-DSA, ...)
+ *   - OpenSSL EVP       : the classical Logos baselines X25519 (KEM-analog) and
+ *                         Ed25519 (signature), which liboqs does not implement.
+ * This lets the classical reference be drawn on the same primitive charts.
+ *
+ * Metrics per operation: full per-iteration wall-clock nanosecond distribution
+ * -> median, MAD, IQR, min, max, mean, stddev, ops/sec, plus per-repetition
+ * medians. Optional userspace PMU cycle counts when available. Heap high-water
+ * via mallinfo2 on glibc (the RPi5 target); honestly reported unavailable
+ * elsewhere (e.g. the macOS smoke box).
+ * ===========================================================================*/
+#define _POSIX_C_SOURCE 200809L
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <math.h>
+#include <time.h>
+#include <setjmp.h>
+#include <signal.h>
+
+#include <oqs/oqs.h>
+
+#include <openssl/evp.h>
+#include <openssl/err.h>
+
+#if defined(__linux__) && defined(__GLIBC__)
+#include <malloc.h>
+#define HAVE_MALLINFO2 1
+#endif
+
+/* ---- timing ------------------------------------------------------------- */
+static inline uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* ---- userspace PMU cycle counter probe (aarch64) ------------------------ */
+static sigjmp_buf g_sigill_jmp;
+static volatile sig_atomic_t g_pmu_ok = 0;
+static void sigill_handler(int sig) { (void)sig; siglongjmp(g_sigill_jmp, 1); }
+
+static inline uint64_t read_cycles(void) {
+#if defined(__aarch64__)
+    uint64_t v;
+    __asm__ volatile("mrs %0, pmccntr_el0" : "=r"(v));
+    return v;
+#else
+    return 0;
+#endif
+}
+
+/* Returns 1 and a reason string if userspace cycle counting works. */
+static int probe_pmu(const char **reason) {
+#if defined(__aarch64__)
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = sigill_handler;
+    sigaction(SIGILL, &sa, &old);
+    if (sigsetjmp(g_sigill_jmp, 1) == 0) {
+        (void)read_cycles();
+        g_pmu_ok = 1;
+    } else {
+        g_pmu_ok = 0;
+    }
+    sigaction(SIGILL, &old, NULL);
+    if (g_pmu_ok) { *reason = "PMCCNTR_EL0 readable from userspace"; return 1; }
+    *reason = "PMCCNTR_EL0 traps (kernel module not loaded; needs e.g. enable_arm_pmu)";
+    return 0;
+#else
+    *reason = "not aarch64";
+    return 0;
+#endif
+}
+
+/* ---- statistics --------------------------------------------------------- */
+typedef struct {
+    double median, mad, iqr, q1, q3, min, max, mean, stddev;
+    double ops_per_sec;
+    uint64_t n;
+} stats_t;
+
+static int cmp_u64(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return (x > y) - (x < y);
+}
+
+/* percentile on an already-sorted array (linear interpolation) */
+static double pct_sorted(const uint64_t *s, uint64_t n, double p) {
+    if (n == 0) return 0;
+    if (n == 1) return (double)s[0];
+    double idx = p * (double)(n - 1);
+    uint64_t lo = (uint64_t)idx;
+    double frac = idx - (double)lo;
+    if (lo + 1 >= n) return (double)s[n - 1];
+    return (double)s[lo] + frac * ((double)s[lo + 1] - (double)s[lo]);
+}
+
+static stats_t compute_stats(uint64_t *samples, uint64_t n) {
+    stats_t st; memset(&st, 0, sizeof st);
+    st.n = n;
+    if (n == 0) return st;
+    qsort(samples, n, sizeof(uint64_t), cmp_u64);
+    st.min = (double)samples[0];
+    st.max = (double)samples[n - 1];
+    st.median = pct_sorted(samples, n, 0.5);
+    st.q1 = pct_sorted(samples, n, 0.25);
+    st.q3 = pct_sorted(samples, n, 0.75);
+    st.iqr = st.q3 - st.q1;
+
+    double sum = 0;
+    for (uint64_t i = 0; i < n; i++) sum += (double)samples[i];
+    st.mean = sum / (double)n;
+    double ss = 0;
+    for (uint64_t i = 0; i < n; i++) {
+        double d = (double)samples[i] - st.mean;
+        ss += d * d;
+    }
+    st.stddev = (n > 1) ? sqrt(ss / (double)(n - 1)) : 0;
+
+    /* MAD = median(|x - median|); needs a second sorted buffer */
+    uint64_t *dev = malloc(n * sizeof(uint64_t));
+    if (dev) {
+        for (uint64_t i = 0; i < n; i++) {
+            double d = (double)samples[i] - st.median;
+            dev[i] = (uint64_t)(d < 0 ? -d : d);
+        }
+        qsort(dev, n, sizeof(uint64_t), cmp_u64);
+        st.mad = pct_sorted(dev, n, 0.5);
+        free(dev);
+    }
+    st.ops_per_sec = st.median > 0 ? 1e9 / st.median : 0;
+    return st;
+}
+
+static void print_stats_json(FILE *f, const char *name, stats_t st,
+                             uint64_t warmup, uint64_t iters, uint64_t reps,
+                             const double *per_rep_median, int n_rep_med) {
+    fprintf(f, "\"%s\":{", name);
+    fprintf(f, "\"unit\":\"ns\",\"warmup_iters\":%llu,\"timed_iters\":%llu,\"repetitions\":%llu,",
+            (unsigned long long)warmup, (unsigned long long)iters, (unsigned long long)reps);
+    fprintf(f, "\"samples\":%llu,", (unsigned long long)st.n);
+    fprintf(f, "\"median\":%.2f,\"mad\":%.2f,\"iqr\":%.2f,\"q1\":%.2f,\"q3\":%.2f,",
+            st.median, st.mad, st.iqr, st.q1, st.q3);
+    fprintf(f, "\"min\":%.2f,\"max\":%.2f,\"mean\":%.2f,\"stddev\":%.2f,",
+            st.min, st.max, st.mean, st.stddev);
+    fprintf(f, "\"ops_per_sec\":%.2f,", st.ops_per_sec);
+    fprintf(f, "\"per_rep_median\":[");
+    for (int i = 0; i < n_rep_med; i++)
+        fprintf(f, "%s%.2f", i ? "," : "", per_rep_median[i]);
+    fprintf(f, "]}");
+}
+
+/* ---- generic measurement loop ------------------------------------------- */
+/* A closure-ish: the caller provides a function pointer that runs one op. */
+typedef int (*op_fn)(void *ctx);
+
+typedef struct {
+    uint64_t *all;        /* all samples across reps */
+    uint64_t  all_n;
+    double    per_rep_median[64];
+    int       n_rep_med;
+} measure_out;
+
+/* Returns 0 on success. Fills out with samples. Re-warms before each rep. */
+static int measure_op(op_fn fn, void *ctx,
+                      uint64_t warmup, uint64_t iters, uint64_t reps,
+                      measure_out *out) {
+    out->all = malloc(iters * reps * sizeof(uint64_t));
+    if (!out->all) return -1;
+    out->all_n = 0;
+    out->n_rep_med = 0;
+    uint64_t *rep_buf = malloc(iters * sizeof(uint64_t));
+    if (!rep_buf) { free(out->all); return -1; }
+
+    for (uint64_t r = 0; r < reps; r++) {
+        for (uint64_t i = 0; i < warmup; i++)
+            if (fn(ctx) != 0) { free(rep_buf); free(out->all); return -2; }
+        for (uint64_t i = 0; i < iters; i++) {
+            uint64_t t0 = now_ns();
+            int rc = fn(ctx);
+            uint64_t dt = now_ns() - t0;
+            if (rc != 0) { free(rep_buf); free(out->all); return -2; }
+            rep_buf[i] = dt;
+            out->all[out->all_n++] = dt;
+        }
+        /* per-rep median (sorts a copy of this rep's slice) */
+        uint64_t *copy = malloc(iters * sizeof(uint64_t));
+        if (copy) {
+            memcpy(copy, rep_buf, iters * sizeof(uint64_t));
+            qsort(copy, iters, sizeof(uint64_t), cmp_u64);
+            if (out->n_rep_med < 64)
+                out->per_rep_median[out->n_rep_med++] = pct_sorted(copy, iters, 0.5);
+            free(copy);
+        }
+    }
+    free(rep_buf);
+    return 0;
+}
+
+/* ======================= liboqs KEM ====================================== */
+typedef struct { OQS_KEM *kem; uint8_t *pk,*sk,*ct,*ss; } kem_ctx;
+static int kem_keygen(void *c){ kem_ctx*x=c; return OQS_KEM_keypair(x->kem,x->pk,x->sk)==OQS_SUCCESS?0:1; }
+static int kem_encaps(void *c){ kem_ctx*x=c; return OQS_KEM_encaps(x->kem,x->ct,x->ss,x->pk)==OQS_SUCCESS?0:1; }
+static int kem_decaps(void *c){ kem_ctx*x=c; return OQS_KEM_decaps(x->kem,x->ss,x->ct,x->sk)==OQS_SUCCESS?0:1; }
+
+static int run_kem(const char *alg, uint64_t warmup, uint64_t iters, uint64_t reps) {
+    OQS_KEM *kem = OQS_KEM_new(alg);
+    if (!kem) {
+        printf("{\"alg\":\"%s\",\"kind\":\"kem\",\"backend\":\"liboqs\",\"enabled\":false,"
+               "\"reason\":\"not enabled in this liboqs build\"}\n", alg);
+        return 0;
+    }
+    kem_ctx x = {kem,
+        malloc(kem->length_public_key), malloc(kem->length_secret_key),
+        malloc(kem->length_ciphertext), malloc(kem->length_shared_secret)};
+    /* prime pk/sk so encaps/decaps have valid inputs */
+    OQS_KEM_keypair(kem, x.pk, x.sk);
+    OQS_KEM_encaps(kem, x.ct, x.ss, x.pk);
+
+    measure_out kg={0}, en={0}, de={0};
+    measure_op(kem_keygen,&x,warmup,iters,reps,&kg);
+    measure_op(kem_encaps,&x,warmup,iters,reps,&en);
+    measure_op(kem_decaps,&x,warmup,iters,reps,&de);
+
+    printf("{\"alg\":\"%s\",\"kind\":\"kem\",\"backend\":\"liboqs\",\"enabled\":true,", alg);
+    printf("\"claimed_nist_level\":%d,", kem->claimed_nist_level);
+    printf("\"sizes\":{\"public_key\":%zu,\"secret_key\":%zu,\"ciphertext\":%zu,\"shared_secret\":%zu},",
+           kem->length_public_key, kem->length_secret_key, kem->length_ciphertext, kem->length_shared_secret);
+    printf("\"operations\":{");
+    stats_t s;
+    s=compute_stats(kg.all,kg.all_n); print_stats_json(stdout,"keygen",s,warmup,iters,reps,kg.per_rep_median,kg.n_rep_med); printf(",");
+    s=compute_stats(en.all,en.all_n); print_stats_json(stdout,"encaps",s,warmup,iters,reps,en.per_rep_median,en.n_rep_med); printf(",");
+    s=compute_stats(de.all,de.all_n); print_stats_json(stdout,"decaps",s,warmup,iters,reps,de.per_rep_median,de.n_rep_med);
+    printf("}}\n");
+
+    free(kg.all); free(en.all); free(de.all);
+    free(x.pk); free(x.sk); free(x.ct); free(x.ss);
+    OQS_KEM_free(kem);
+    return 0;
+}
+
+/* ======================= liboqs SIG ====================================== */
+typedef struct { OQS_SIG *sig; uint8_t *pk,*sk,*msg,*signature; size_t siglen; } sig_ctx;
+static int sig_keygen(void *c){ sig_ctx*x=c; return OQS_SIG_keypair(x->sig,x->pk,x->sk)==OQS_SUCCESS?0:1; }
+static int sig_sign(void *c){ sig_ctx*x=c; return OQS_SIG_sign(x->sig,x->signature,&x->siglen,x->msg,32,x->sk)==OQS_SUCCESS?0:1; }
+static int sig_verify(void *c){ sig_ctx*x=c; return OQS_SIG_verify(x->sig,x->msg,32,x->signature,x->siglen,x->pk)==OQS_SUCCESS?0:1; }
+
+static int run_sig(const char *alg, uint64_t warmup, uint64_t iters, uint64_t reps) {
+    OQS_SIG *sig = OQS_SIG_new(alg);
+    if (!sig) {
+        printf("{\"alg\":\"%s\",\"kind\":\"sig\",\"backend\":\"liboqs\",\"enabled\":false,"
+               "\"reason\":\"not enabled in this liboqs build\"}\n", alg);
+        return 0;
+    }
+    sig_ctx x; memset(&x,0,sizeof x);
+    x.sig=sig;
+    x.pk=malloc(sig->length_public_key); x.sk=malloc(sig->length_secret_key);
+    x.signature=malloc(sig->length_signature); x.msg=malloc(32);
+    memset(x.msg,0xA5,32);
+    OQS_SIG_keypair(sig,x.pk,x.sk);
+    x.siglen=sig->length_signature;
+    OQS_SIG_sign(sig,x.signature,&x.siglen,x.msg,32,x.sk);
+
+    measure_out kg={0}, sg={0}, vf={0};
+    measure_op(sig_keygen,&x,warmup,iters,reps,&kg);
+    measure_op(sig_sign,&x,warmup,iters,reps,&sg);
+    measure_op(sig_verify,&x,warmup,iters,reps,&vf);
+
+    printf("{\"alg\":\"%s\",\"kind\":\"sig\",\"backend\":\"liboqs\",\"enabled\":true,", alg);
+    printf("\"claimed_nist_level\":%d,", sig->claimed_nist_level);
+    printf("\"sizes\":{\"public_key\":%zu,\"secret_key\":%zu,\"signature\":%zu},",
+           sig->length_public_key, sig->length_secret_key, sig->length_signature);
+    printf("\"operations\":{");
+    stats_t s;
+    s=compute_stats(kg.all,kg.all_n); print_stats_json(stdout,"keygen",s,warmup,iters,reps,kg.per_rep_median,kg.n_rep_med); printf(",");
+    s=compute_stats(sg.all,sg.all_n); print_stats_json(stdout,"sign",s,warmup,iters,reps,sg.per_rep_median,sg.n_rep_med); printf(",");
+    s=compute_stats(vf.all,vf.all_n); print_stats_json(stdout,"verify",s,warmup,iters,reps,vf.per_rep_median,vf.n_rep_med);
+    printf("}}\n");
+
+    free(kg.all); free(sg.all); free(vf.all);
+    free(x.pk); free(x.sk); free(x.signature); free(x.msg);
+    OQS_SIG_free(sig);
+    return 0;
+}
+
+/* ======================= OpenSSL classical baselines ===================== */
+/* X25519 as a KEM-analog: keygen + ECDH derive (one shared-secret derivation). */
+typedef struct { EVP_PKEY *self; EVP_PKEY *peer; } x25519_ctx;
+static int x25519_keygen(void *c){
+    x25519_ctx*x=c;
+    if (x->self) { EVP_PKEY_free(x->self); x->self=NULL; }
+    EVP_PKEY_CTX *p = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519,NULL);
+    if(!p) return 1;
+    int ok = EVP_PKEY_keygen_init(p)>0 && EVP_PKEY_keygen(p,&x->self)>0;
+    EVP_PKEY_CTX_free(p);
+    return ok?0:1;
+}
+static int x25519_derive(void *c){
+    x25519_ctx*x=c;
+    EVP_PKEY_CTX *p = EVP_PKEY_CTX_new(x->self,NULL);
+    if(!p) return 1;
+    unsigned char secret[32]; size_t slen=sizeof secret;
+    int ok = EVP_PKEY_derive_init(p)>0 &&
+             EVP_PKEY_derive_set_peer(p,x->peer)>0 &&
+             EVP_PKEY_derive(p,secret,&slen)>0;
+    EVP_PKEY_CTX_free(p);
+    return ok?0:1;
+}
+
+static int run_x25519(uint64_t warmup, uint64_t iters, uint64_t reps) {
+    x25519_ctx x={0};
+    x25519_keygen(&x);                 /* self */
+    /* a fixed peer key for derive */
+    EVP_PKEY_CTX *p = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519,NULL);
+    EVP_PKEY_keygen_init(p); EVP_PKEY_keygen(p,&x.peer); EVP_PKEY_CTX_free(p);
+
+    measure_out kg={0}, dv={0};
+    measure_op(x25519_keygen,&x,warmup,iters,reps,&kg);
+    /* keygen frees+replaces self each call; re-make a stable self for derive */
+    x25519_keygen(&x);
+    measure_op(x25519_derive,&x,warmup,iters,reps,&dv);
+
+    printf("{\"alg\":\"X25519\",\"kind\":\"kem\",\"backend\":\"openssl\",\"classical\":true,\"enabled\":true,");
+    printf("\"claimed_nist_level\":1,");
+    printf("\"sizes\":{\"public_key\":32,\"secret_key\":32,\"ciphertext\":null,\"shared_secret\":32},");
+    printf("\"operations\":{");
+    stats_t s;
+    s=compute_stats(kg.all,kg.all_n); print_stats_json(stdout,"keygen",s,warmup,iters,reps,kg.per_rep_median,kg.n_rep_med); printf(",");
+    s=compute_stats(dv.all,dv.all_n); print_stats_json(stdout,"derive",s,warmup,iters,reps,dv.per_rep_median,dv.n_rep_med);
+    printf("}}\n");
+    free(kg.all); free(dv.all);
+    if(x.self)EVP_PKEY_free(x.self); if(x.peer)EVP_PKEY_free(x.peer);
+    return 0;
+}
+
+/* Ed25519 signature baseline. */
+typedef struct { EVP_PKEY *key; unsigned char msg[32]; unsigned char sig[64]; size_t siglen; } ed_ctx;
+static int ed_keygen(void *c){
+    ed_ctx*x=c;
+    if(x->key){EVP_PKEY_free(x->key);x->key=NULL;}
+    EVP_PKEY_CTX *p=EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519,NULL);
+    if(!p)return 1;
+    int ok=EVP_PKEY_keygen_init(p)>0 && EVP_PKEY_keygen(p,&x->key)>0;
+    EVP_PKEY_CTX_free(p);
+    return ok?0:1;
+}
+static int ed_sign(void *c){
+    ed_ctx*x=c;
+    EVP_MD_CTX *m=EVP_MD_CTX_new(); if(!m)return 1;
+    x->siglen=sizeof x->sig;
+    int ok = EVP_DigestSignInit(m,NULL,NULL,NULL,x->key)>0 &&
+             EVP_DigestSign(m,x->sig,&x->siglen,x->msg,sizeof x->msg)>0;
+    EVP_MD_CTX_free(m);
+    return ok?0:1;
+}
+static int ed_verify(void *c){
+    ed_ctx*x=c;
+    EVP_MD_CTX *m=EVP_MD_CTX_new(); if(!m)return 1;
+    int ok = EVP_DigestVerifyInit(m,NULL,NULL,NULL,x->key)>0 &&
+             EVP_DigestVerify(m,x->sig,x->siglen,x->msg,sizeof x->msg)>0;
+    EVP_MD_CTX_free(m);
+    return ok?0:1;
+}
+
+static int run_ed25519(uint64_t warmup, uint64_t iters, uint64_t reps) {
+    ed_ctx x; memset(&x,0,sizeof x); memset(x.msg,0xA5,sizeof x.msg);
+    ed_keygen(&x); ed_sign(&x);
+    measure_out kg={0}, sg={0}, vf={0};
+    measure_op(ed_keygen,&x,warmup,iters,reps,&kg);
+    ed_keygen(&x); ed_sign(&x);   /* stable key+sig for sign/verify timing */
+    measure_op(ed_sign,&x,warmup,iters,reps,&sg);
+    measure_op(ed_verify,&x,warmup,iters,reps,&vf);
+
+    printf("{\"alg\":\"Ed25519\",\"kind\":\"sig\",\"backend\":\"openssl\",\"classical\":true,\"enabled\":true,");
+    printf("\"claimed_nist_level\":1,");
+    printf("\"sizes\":{\"public_key\":32,\"secret_key\":32,\"signature\":64},");
+    printf("\"operations\":{");
+    stats_t s;
+    s=compute_stats(kg.all,kg.all_n); print_stats_json(stdout,"keygen",s,warmup,iters,reps,kg.per_rep_median,kg.n_rep_med); printf(",");
+    s=compute_stats(sg.all,sg.all_n); print_stats_json(stdout,"sign",s,warmup,iters,reps,sg.per_rep_median,sg.n_rep_med); printf(",");
+    s=compute_stats(vf.all,vf.all_n); print_stats_json(stdout,"verify",s,warmup,iters,reps,vf.per_rep_median,vf.n_rep_med);
+    printf("}}\n");
+    free(kg.all); free(sg.all); free(vf.all);
+    if(x.key)EVP_PKEY_free(x.key);
+    return 0;
+}
+
+/* ---- main --------------------------------------------------------------- */
+static void usage(void){ fprintf(stderr,"usage: bench_pq --kind kem|sig --alg NAME [--warmup N --iters N --reps N]\n"); }
+
+int main(int argc, char **argv) {
+    const char *kind=NULL, *alg=NULL;
+    uint64_t warmup=1000, iters=10000, reps=5;
+    for (int i=1;i<argc;i++){
+        if(!strcmp(argv[i],"--kind")&&i+1<argc) kind=argv[++i];
+        else if(!strcmp(argv[i],"--alg")&&i+1<argc) alg=argv[++i];
+        else if(!strcmp(argv[i],"--warmup")&&i+1<argc) warmup=strtoull(argv[++i],0,10);
+        else if(!strcmp(argv[i],"--iters")&&i+1<argc) iters=strtoull(argv[++i],0,10);
+        else if(!strcmp(argv[i],"--reps")&&i+1<argc) reps=strtoull(argv[++i],0,10);
+        else { usage(); return 2; }
+    }
+    if(!kind||!alg){ usage(); return 2; }
+
+    /* PMU cycle availability probe (reported once via stderr-free channel:
+     * embedded into the JSON header line below). */
+    const char *pmu_reason=NULL;
+    int pmu_ok = probe_pmu(&pmu_reason);
+    fprintf(stderr,"[bench_pq] cycles_available=%d (%s)\n", pmu_ok, pmu_reason);
+
+    OQS_init();
+    int rc;
+    if(!strcmp(kind,"kem")){
+        if(!strcmp(alg,"X25519")) rc=run_x25519(warmup,iters,reps);
+        else rc=run_kem(alg,warmup,iters,reps);
+    } else if(!strcmp(kind,"sig")){
+        if(!strcmp(alg,"Ed25519")) rc=run_ed25519(warmup,iters,reps);
+        else rc=run_sig(alg,warmup,iters,reps);
+    } else { usage(); rc=2; }
+    OQS_destroy();
+    return rc;
+}

@@ -1,0 +1,224 @@
+# shellcheck shell=bash
+# =============================================================================
+# lib_platform.sh — portable platform abstraction
+#
+# Sourced by setup/setup.sh and run.sh. Every operation that differs between the
+# RPi5 (Debian/Ubuntu aarch64) measurement target and the macOS/Apple-Silicon
+# dev box is funneled through one of these functions, so the *identical* codebase
+# runs unchanged on both. Where a capability does not exist on a platform
+# (governor control, core pinning, on-die thermal sensors), the function degrades
+# gracefully and the caller records that it was unavailable — it never silently
+# pretends the action happened.
+# =============================================================================
+
+# ---- platform detection ----------------------------------------------------
+# Sets: PQB_OS (macos|linux), PQB_ARCH, PQB_IS_RPI (1|0), PQB_RPI_MODEL
+pqb_detect_platform() {
+  PQB_ARCH="$(uname -m)"
+  case "$(uname -s)" in
+    Darwin) PQB_OS="macos" ;;
+    Linux)  PQB_OS="linux" ;;
+    *)      PQB_OS="unknown" ;;
+  esac
+
+  PQB_IS_RPI=0
+  PQB_RPI_MODEL=""
+  if [ "$PQB_OS" = "linux" ] && [ -r /proc/device-tree/model ]; then
+    # /proc/device-tree/model is NUL-terminated
+    PQB_RPI_MODEL="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null)"
+    case "$PQB_RPI_MODEL" in
+      *"Raspberry Pi"*) PQB_IS_RPI=1 ;;
+    esac
+  fi
+  export PQB_OS PQB_ARCH PQB_IS_RPI PQB_RPI_MODEL
+}
+
+# ---- friendly logging ------------------------------------------------------
+pqb_log()  { printf '\033[1;34m[pqb]\033[0m %s\n' "$*" >&2; }
+pqb_warn() { printf '\033[1;33m[pqb WARN]\033[0m %s\n' "$*" >&2; }
+pqb_err()  { printf '\033[1;31m[pqb ERR]\033[0m %s\n' "$*" >&2; }
+
+# ---- hostname resolution ---------------------------------------------------
+# A "good" host id is non-empty, not localhost, and not an avahi/macOS
+# auto-assigned "unknown<hexMAC>" placeholder (which is what shows up when no
+# real hostname is set — that produced the ugly results filename before).
+_pqb_good_host() {
+  local h="$1"
+  [ -n "$h" ] || return 1
+  case "$h" in
+    localhost|localhost.*) return 1 ;;
+  esac
+  printf '%s' "$h" | grep -Eq '^[Uu]nknown[0-9a-fA-F]{6,}$' && return 1
+  return 0
+}
+
+# Resolve a readable, stable host identifier, falling through:
+#   $HOSTNAME -> `hostname` -> hostnamectl --static (Linux) /
+#   scutil --get LocalHostName (macOS) -> short machine id (last resort).
+# Domain suffixes (.home/.local/...) are stripped. On the RPi5 this yields the
+# actual pi hostname; on this Mac it falls through to LocalHostName.
+pqb_resolve_hostname() {
+  local cands=() c h
+  cands+=("${HOSTNAME:-}")
+  cands+=("$(hostname 2>/dev/null || true)")
+  if [ "${PQB_OS:-}" = "linux" ]; then
+    cands+=("$(hostnamectl --static 2>/dev/null || true)")
+  elif [ "${PQB_OS:-}" = "macos" ]; then
+    cands+=("$(scutil --get LocalHostName 2>/dev/null || true)")
+  fi
+  for c in "${cands[@]}"; do
+    h="${c%%.*}"                         # strip domain suffix
+    if _pqb_good_host "$h"; then echo "$h"; return 0; fi
+  done
+  # last resort: a short, stable machine id so files never collide as "unknown"
+  local mid=""
+  if [ -r /etc/machine-id ]; then
+    mid="$(cut -c1-12 /etc/machine-id 2>/dev/null)"
+  elif [ "${PQB_OS:-}" = "macos" ]; then
+    mid="$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null \
+           | awk -F'"' '/IOPlatformUUID/{print $4}' | tr -d '-' | cut -c1-12)"
+  fi
+  echo "host-${mid:-unknown}"
+}
+
+# ---- CPU governor ----------------------------------------------------------
+# Returns 0 if it set 'performance', 1 if unavailable. Prints the governor it
+# left the system in on stdout.
+pqb_set_governor_performance() {
+  if [ "$PQB_OS" = "linux" ] && [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; then
+    local ok=1 g
+    for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+      [ -w "$g" ] || { ok=0; continue; }
+      echo performance > "$g" 2>/dev/null || ok=0
+    done
+    if [ "$ok" = 1 ]; then
+      cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null
+      return 0
+    fi
+    # try cpupower as a fallback (may need sudo)
+    if command -v cpupower >/dev/null 2>&1 && cpupower frequency-set -g performance >/dev/null 2>&1; then
+      echo performance; return 0
+    fi
+    pqb_warn "could not set governor to performance (need root? try: sudo ./run.sh)"
+    cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown"
+    return 1
+  fi
+  # macOS / other: no userspace governor control.
+  echo "unavailable"
+  return 1
+}
+
+pqb_get_governor() {
+  if [ "$PQB_OS" = "linux" ] && [ -r /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
+    cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+  else
+    echo "unavailable"
+  fi
+}
+
+# ---- core pinning ----------------------------------------------------------
+# pqb_taskset_prefix <core> -> echoes a command prefix to pin to that core, or
+# empty string if pinning is unavailable (caller warns).
+pqb_taskset_prefix() {
+  local core="$1"
+  if command -v taskset >/dev/null 2>&1; then
+    echo "taskset -c $core"
+  elif command -v numactl >/dev/null 2>&1; then
+    echo "numactl --physcpubind=$core"
+  else
+    echo ""   # no pinning available (e.g. macOS)
+  fi
+}
+
+# ---- thermal / clock sampling ----------------------------------------------
+# pqb_sample_thermal -> one CSV line: epoch_s,arm_clock_hz,temp_c,throttled_hex
+# Fields that cannot be read on a platform are emitted as empty (no fake zeros).
+pqb_sample_thermal() {
+  local ts clk temp thr
+  ts="$(date +%s)"
+  clk=""; temp=""; thr=""
+
+  if command -v vcgencmd >/dev/null 2>&1; then
+    # Raspberry Pi: authoritative SoC sensors.
+    clk="$(vcgencmd measure_clock arm 2>/dev/null | sed -n 's/.*=//p')"
+    temp="$(vcgencmd measure_temp 2>/dev/null | sed -n "s/temp=\([0-9.]*\).*/\1/p")"
+    thr="$(vcgencmd get_throttled 2>/dev/null | sed -n 's/.*=//p')"
+  elif [ "$PQB_OS" = "linux" ]; then
+    # Generic Linux fallback (cpufreq + thermal_zone).
+    local f
+    f=/sys/devices/system/cpu/cpu${PQB_BENCH_CORE:-0}/cpufreq/scaling_cur_freq
+    [ -r "$f" ] && clk="$(( $(cat "$f") * 1000 ))"   # kHz -> Hz
+    if [ -r /sys/class/thermal/thermal_zone0/temp ]; then
+      local milli; milli="$(cat /sys/class/thermal/thermal_zone0/temp)"
+      temp="$(awk -v m="$milli" 'BEGIN{printf "%.1f", m/1000}')"
+    fi
+  fi
+  # macOS: live per-core freq/temp require sudo powermetrics; we intentionally
+  # leave them empty rather than emit misleading values. (Smoke test only.)
+
+  printf '%s,%s,%s,%s\n' "$ts" "$clk" "$temp" "$thr"
+}
+
+# pqb_throttled_active <throttled_hex> -> 0 if thermal throttling currently/has
+# occurred, 1 otherwise. RPi get_throttled bit 0 = under-voltage now,
+# bit 1 = arm freq capped now, bit 2 = currently throttled,
+# bit 3 = soft temp limit active (and bits 16-19 = "has occurred" latches).
+pqb_throttled_active() {
+  local hex="${1#0x}"
+  [ -z "$hex" ] && return 1
+  local val=$(( 16#$hex ))
+  # bit2 (throttling now) or bit18 (throttling has occurred)
+  if [ $(( val & 0x4 )) -ne 0 ] || [ $(( val & 0x40000 )) -ne 0 ]; then
+    return 0
+  fi
+  return 1
+}
+
+# ---- CPU feature / crypto-extension detection ------------------------------
+# Echoes a JSON object describing NEON + SHA3/SHA512 acceleration. Consumed
+# verbatim by env metadata so results record whether Keccak accel is in use.
+pqb_cpu_features_json() {
+  local neon=false sha2=false sha3=false sha512=false aes=false pmull=false src="unknown"
+  if [ "$PQB_OS" = "linux" ] && [ -r /proc/cpuinfo ]; then
+    src="/proc/cpuinfo"
+    local feats; feats="$(grep -m1 -i '^Features' /proc/cpuinfo | tr 'A-Z' 'a-z')"
+    case "$feats" in *" asimd"*|*"neon"*) neon=true;; esac
+    case "$feats" in *" sha2"*) sha2=true;; esac
+    case "$feats" in *" sha3"*) sha3=true;; esac
+    case "$feats" in *" sha512"*) sha512=true;; esac
+    case "$feats" in *" aes"*) aes=true;; esac
+    case "$feats" in *" pmull"*) pmull=true;; esac
+  elif [ "$PQB_OS" = "macos" ]; then
+    src="sysctl"
+    neon=true   # all Apple Silicon has NEON/ASIMD
+    [ "$(sysctl -n hw.optional.arm.FEAT_SHA256 2>/dev/null)" = 1 ] && sha2=true
+    [ "$(sysctl -n hw.optional.arm.FEAT_SHA3   2>/dev/null)" = 1 ] && sha3=true
+    [ "$(sysctl -n hw.optional.arm.FEAT_SHA512 2>/dev/null)" = 1 ] && sha512=true
+    [ "$(sysctl -n hw.optional.arm.FEAT_AES    2>/dev/null)" = 1 ] && aes=true
+    [ "$(sysctl -n hw.optional.arm.FEAT_PMULL  2>/dev/null)" = 1 ] && pmull=true
+  fi
+  printf '{"source":"%s","neon":%s,"sha2":%s,"sha3":%s,"sha512":%s,"aes":%s,"pmull":%s}' \
+    "$src" "$neon" "$sha2" "$sha3" "$sha512" "$aes" "$pmull"
+}
+
+# ---- package installation --------------------------------------------------
+# pqb_install_build_deps -> installs compiler/cmake/openssl headers per platform.
+pqb_install_build_deps() {
+  if [ "$PQB_OS" = "macos" ]; then
+    command -v brew >/dev/null 2>&1 || { pqb_err "Homebrew required on macOS: https://brew.sh"; return 1; }
+    pqb_log "installing build deps via Homebrew"
+    brew install cmake ninja openssl@3 git python3 >/dev/null || true
+  elif [ "$PQB_OS" = "linux" ]; then
+    if command -v apt-get >/dev/null 2>&1; then
+      pqb_log "installing build deps via apt"
+      local SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+      $SUDO apt-get update -qq
+      $SUDO apt-get install -y -qq \
+        build-essential cmake ninja-build git python3 perl \
+        libssl-dev pkg-config astyle doxygen \
+        cpufrequtils util-linux >/dev/null
+    else
+      pqb_warn "no apt-get found; install cmake/ninja/gcc/libssl-dev manually"
+    fi
+  fi
+}

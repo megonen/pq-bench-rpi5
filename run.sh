@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# =============================================================================
+# run.sh — measurement wrapper + orchestrator.
+#
+# Does the things that make a number credible:
+#   * sets the CPU governor to `performance` (Linux; warns elsewhere)
+#   * pins the benchmark to a single isolated core via taskset (core 3 on RPi5;
+#     core 3 stays clear of CPU0 where the kernel steers IRQs/RPS)
+#   * logs ARM clock + SoC temperature throughout, embeds the trace in results,
+#     and warns on thermal throttling
+#   * runs every candidate from config.yaml, then assembles one results JSON
+#     stamped with full host + toolchain provenance.
+#
+# Usage:
+#   ./run.sh                 # full run using config.yaml knobs
+#   ./run.sh --smoke         # tiny iteration counts: pipeline smoke test
+#   ./run.sh --kemsig-only   # skip the TLS layer
+#   ./run.sh --tls-only      # only the TLS layer
+#   ./run.sh --iters N --warmup N --reps N   # override measurement knobs
+#   sudo ./run.sh            # needed on Linux to set the governor
+# =============================================================================
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOL_VERSION="0.1.0"
+# shellcheck source=setup/lib_platform.sh
+source "$ROOT/setup/lib_platform.sh"
+# shellcheck source=setup/versions.env
+source "$ROOT/setup/versions.env"
+LOCK="$ROOT/setup/versions.lock"
+[ -f "$LOCK" ] && source "$LOCK" || pqb_warn "no versions.lock — run ./setup/setup.sh first"
+
+pqb_detect_platform
+
+# ---- args ------------------------------------------------------------------
+SMOKE=0; DO_KEMSIG=1; DO_TLS=1
+OVR_ITERS=""; OVR_WARMUP=""; OVR_REPS=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --smoke) SMOKE=1 ;;
+    --kemsig-only) DO_TLS=0 ;;
+    --tls-only) DO_KEMSIG=0 ;;
+    --no-tls) DO_TLS=0 ;;
+    --iters) OVR_ITERS="$2"; shift ;;
+    --warmup) OVR_WARMUP="$2"; shift ;;
+    --reps) OVR_REPS="$2"; shift ;;
+    -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) pqb_err "unknown arg: $1"; exit 2 ;;
+  esac
+  shift
+done
+
+# ---- measurement knobs (config.yaml, overridable) --------------------------
+eval "$(python3 "$ROOT/bench/lib/list_algs.py" measurement "$ROOT/config.yaml")"
+[ -n "$OVR_ITERS" ]  && ITERS="$OVR_ITERS"
+[ -n "$OVR_WARMUP" ] && WARMUP="$OVR_WARMUP"
+[ -n "$OVR_REPS" ]   && REPS="$OVR_REPS"
+if [ "$SMOKE" = 1 ]; then
+  # Deliberately tiny so the whole sweep (incl. slow SLH-DSA signing) finishes
+  # in well under a minute. This is a pipeline test, NOT measurement data.
+  WARMUP=5; ITERS=25; REPS=1
+  pqb_warn "SMOKE MODE: tiny iteration counts — pipeline test only, NOT measurement data"
+fi
+BENCH_CORE="${BENCH_CORE:-3}"
+export PQB_BENCH_CORE="$BENCH_CORE"
+
+# ---- work directory --------------------------------------------------------
+HOST="$(pqb_resolve_hostname)"
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+WORK="$ROOT/results/.work-$HOST-$TS"
+mkdir -p "$WORK" "$ROOT/results"
+KEMSIG_OUT="$WORK/kemsig.jsonl"; : > "$KEMSIG_OUT"
+TLS_OUT="$WORK/tls.json"
+THERMAL="$WORK/thermal.csv"; : > "$THERMAL"
+META="$WORK/meta.env"
+FEATURES="$WORK/cpu_features.json"
+WARN_ACC=""
+
+add_warn() { WARN_ACC="${WARN_ACC:+$WARN_ACC||}$1"; pqb_warn "$1"; }
+
+# ---- governor --------------------------------------------------------------
+GOV_BEFORE="$(pqb_get_governor)"
+GOV_AFTER="$(pqb_set_governor_performance || true)"
+GOV_REQUESTED="performance"
+if [ "$GOV_AFTER" != "performance" ]; then
+  add_warn "governor is '$GOV_AFTER', not 'performance' (need root on Linux, or unsupported on macOS)"
+fi
+
+# ---- core pinning ----------------------------------------------------------
+TASKSET="$(pqb_taskset_prefix "$BENCH_CORE")"
+if [ -n "$TASKSET" ]; then
+  PINNED=1; pqb_log "pinning to core $BENCH_CORE via: $TASKSET"
+else
+  PINNED=0; add_warn "core pinning unavailable (no taskset/numactl) — results will be noisier"
+fi
+
+# ---- thermal sampler (background) ------------------------------------------
+SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-1}"
+pqb_log "starting thermal/clock sampler (every ${SAMPLE_INTERVAL}s) -> $THERMAL"
+( while :; do pqb_sample_thermal >> "$THERMAL" 2>/dev/null; sleep "$SAMPLE_INTERVAL"; done ) &
+SAMPLER_PID=$!
+disown "$SAMPLER_PID" 2>/dev/null || true   # suppress job-control "Terminated" noise on kill
+# shellcheck disable=SC2064
+trap "kill $SAMPLER_PID 2>/dev/null || true" EXIT
+pqb_sample_thermal >> "$THERMAL" 2>/dev/null   # one immediate sample
+
+# ---- CPU features ----------------------------------------------------------
+pqb_cpu_features_json > "$FEATURES"
+pqb_log "cpu features: $(cat "$FEATURES")"
+# Report whether Keccak/SHA3 *instruction* acceleration is available + compiled.
+SHA3_HW="$(python3 -c "import json;print(json.load(open('$FEATURES'))['sha3'])" 2>/dev/null || echo unknown)"
+case "${LIBOQS_OPT_DEFINES:-}" in
+  *"OQS_USE_ARM_SHA3_INSTRUCTIONS 1"*) SHA3_COMPILED=1 ;;
+  *) SHA3_COMPILED=0 ;;
+esac
+pqb_log "Keccak/SHA3: hw_instructions=$SHA3_HW liboqs_compiled_sha3=$SHA3_COMPILED (A76 has no SHA3 ext; Keccak runs on NEON there)"
+
+TS_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+START_EPOCH="$(date +%s)"
+
+# ---- build harness if needed -----------------------------------------------
+OSSL_PREFIX_FOR_BUILD="${OPENSSL_PREFIX:-$(brew --prefix openssl@3 2>/dev/null || echo /usr)}"
+if [ ! -x "$ROOT/bench/kem_sig/bench_pq" ] || [ "$ROOT/bench/kem_sig/bench_pq.c" -nt "$ROOT/bench/kem_sig/bench_pq" ]; then
+  pqb_log "building bench_pq harness"
+  make -C "$ROOT/bench/kem_sig" \
+    LIBOQS_PREFIX="${PREFIX:-$ROOT/vendor/install}" \
+    OPENSSL_PREFIX="$OSSL_PREFIX_FOR_BUILD" \
+    BENCH_CFLAGS="${BENCH_CFLAGS:--O3}" >/dev/null
+fi
+
+# ---- KEM/sig sweep ---------------------------------------------------------
+CYCLES_AVAILABLE=0; CYCLES_REASON="not probed"
+if [ "$DO_KEMSIG" = 1 ]; then
+  pqb_log "running KEM/sig sweep (warmup=$WARMUP iters=$ITERS reps=$REPS)"
+  while IFS=$'\t' read -r kind alg classical; do
+    [ -z "$alg" ] && continue
+    pqb_log "  $kind $alg"
+    ERRF="$WORK/err.$kind.$alg.txt"
+    # shellcheck disable=SC2086
+    if $TASKSET "$ROOT/bench/kem_sig/bench_pq" --kind "$kind" --alg "$alg" \
+        --warmup "$WARMUP" --iters "$ITERS" --reps "$REPS" >> "$KEMSIG_OUT" 2>"$ERRF"; then
+      :
+    else
+      add_warn "harness failed for $kind $alg (see $ERRF)"
+    fi
+    # capture PMU availability from the harness's stderr (first occurrence)
+    if grep -q 'cycles_available=1' "$ERRF" 2>/dev/null; then
+      CYCLES_AVAILABLE=1; CYCLES_REASON="$(sed -n 's/.*cycles_available=1 (\(.*\))/\1/p' "$ERRF" | head -1)"
+    elif [ "$CYCLES_AVAILABLE" = 0 ] && grep -q 'cycles_available=0' "$ERRF" 2>/dev/null; then
+      CYCLES_REASON="$(sed -n 's/.*cycles_available=0 (\(.*\))/\1/p' "$ERRF" | head -1)"
+    fi
+  done < <(python3 "$ROOT/bench/lib/list_algs.py" kemsig "$ROOT/config.yaml")
+fi
+
+# ---- TLS layer -------------------------------------------------------------
+if [ "$DO_TLS" = 1 ]; then
+  if [ -x "$ROOT/bench/tls/run_tls.sh" ]; then
+    TLS_CONNS="$(python3 -c "import json,sys;print(json.loads(sys.argv[1]).get('connections',1000))" \
+                  "$(python3 "$ROOT/bench/lib/list_algs.py" tls "$ROOT/config.yaml")")"
+    [ "$SMOKE" = 1 ] && TLS_CONNS=50
+    pqb_log "running TLS handshake matrix ($TLS_CONNS handshakes/cell)"
+    if PQB_TASKSET="$TASKSET" "$ROOT/bench/tls/run_tls.sh" \
+         --out "$TLS_OUT" --connections "$TLS_CONNS" >"$WORK/tls.log" 2>&1; then
+      pqb_log "TLS layer done ($(grep -c '"label"' "$TLS_OUT" 2>/dev/null || echo 0) cells)"
+    else
+      add_warn "TLS layer failed or unavailable (see $WORK/tls.log) — continuing without it"
+      TLS_OUT=""
+    fi
+  else
+    pqb_warn "TLS harness not present yet — skipping (will be added)"
+    TLS_OUT=""
+  fi
+fi
+
+# ---- stop sampler, gather timing -------------------------------------------
+kill "$SAMPLER_PID" 2>/dev/null || true
+trap - EXIT
+TS_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+DURATION=$(( $(date +%s) - START_EPOCH ))
+GOV_AFTER_END="$(pqb_get_governor)"
+
+# ---- host facts ------------------------------------------------------------
+collect_host_facts() {
+  local cpu_brand="" ncpu="" ram="" os_pretty="" kernel
+  kernel="$(uname -r)"
+  if [ "$PQB_OS" = "macos" ]; then
+    cpu_brand="$(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
+    ncpu="$(sysctl -n hw.ncpu 2>/dev/null)"
+    ram="$(sysctl -n hw.memsize 2>/dev/null)"
+    os_pretty="macOS $(sw_vers -productVersion 2>/dev/null) ($(sw_vers -buildVersion 2>/dev/null))"
+  else
+    cpu_brand="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | sed 's/.*: //')"
+    [ -z "$cpu_brand" ] && cpu_brand="$PQB_RPI_MODEL"
+    ncpu="$( (command -v nproc >/dev/null && nproc) || grep -c ^processor /proc/cpuinfo)"
+    ram="$(( $(grep -m1 MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}') * 1024 ))"
+    os_pretty="$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")"
+  fi
+  {
+    echo "TOOL_VERSION=$TOOL_VERSION"
+    echo "HOSTNAME=$HOST"
+    echo "OS=$PQB_OS"
+    echo "ARCH=$PQB_ARCH"
+    echo "KERNEL=$kernel"
+    echo "OS_PRETTY=\"$os_pretty\""
+    echo "IS_RPI=$PQB_IS_RPI"
+    echo "RPI_MODEL=\"$PQB_RPI_MODEL\""
+    echo "CPU_BRAND=\"$cpu_brand\""
+    echo "NCPU=$ncpu"
+    echo "RAM_BYTES=$ram"
+    echo "GOVERNOR_REQUESTED=$GOV_REQUESTED"
+    echo "GOVERNOR_BEFORE=$GOV_BEFORE"
+    echo "GOVERNOR_AFTER=$GOV_AFTER_END"
+    echo "BENCH_CORE=$BENCH_CORE"
+    echo "PINNED=$PINNED"
+    echo "TASKSET_CMD=\"$TASKSET\""
+    echo "WARMUP=$WARMUP"
+    echo "ITERS=$ITERS"
+    echo "REPS=$REPS"
+    echo "CYCLES_MODE=$CYCLES_MODE"
+    echo "CYCLES_AVAILABLE=$CYCLES_AVAILABLE"
+    echo "CYCLES_REASON=\"$CYCLES_REASON\""
+    echo "TS_START_UTC=$TS_START"
+    echo "TS_END_UTC=$TS_END"
+    echo "DURATION_S=$DURATION"
+    echo "WARNINGS=\"$WARN_ACC\""
+  } > "$META"
+}
+collect_host_facts
+
+# ---- assemble final results JSON -------------------------------------------
+OUT="$ROOT/results/${HOST}-${TS}.json"
+python3 "$ROOT/bench/lib/assemble.py" \
+  --meta "$META" --lock "$LOCK" --features "$FEATURES" \
+  --kemsig "$KEMSIG_OUT" ${TLS_OUT:+--tls "$TLS_OUT"} \
+  --thermal "$THERMAL" --config "$ROOT/config.yaml" \
+  --out "$OUT" >/dev/null
+
+# ---- summary ---------------------------------------------------------------
+echo
+pqb_log "================ RUN COMPLETE ================"
+python3 - "$OUT" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+g=d["is_baseline_grade"]
+print(f"  results: {sys.argv[1]}")
+print(f"  host: {d['host']['cpu_brand']} ({d['host']['os_pretty']})")
+print(f"  baseline-grade (RPi5): {g}")
+if not g:
+    for r in d['baseline_grade_reasons']:
+        print(f"     - {r}")
+tt=d['thermal_trace']
+print(f"  thermal: {tt.get('temp_c')}  throttling={tt.get('throttling_detected')}")
+print(f"  kem algos: {sum(1 for x in d['kem'] if x.get('enabled'))} enabled / {len(d['kem'])}")
+print(f"  sig algos: {sum(1 for x in d['sig'] if x.get('enabled'))} enabled / {len(d['sig'])}")
+print(f"  cycles available: {d['run']['cycles_available']}")
+PY
+pqb_log "keep raw work dir? -> $WORK (safe to delete)"

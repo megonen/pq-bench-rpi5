@@ -1,0 +1,32 @@
+# Build trees / vendored deps (rebuilt by setup/setup.sh)
+/vendor/
+/build/
+setup/versions.lock
+
+# Compiled harness binaries
+bench/kem_sig/bench_pq
+bench/tls/bench_tls
+*.o
+
+# Generated TLS material
+bench/tls/pki/
+
+# Local results are kept by users, not committed by default.
+# Comment the next line out if you DO want to commit your machine's results.
+results/*.json
+!results/example-*.json
+
+# Merged dataset consumed by the dashboard
+dashboard/data/merged.json
+analyze/png/
+
+# Python venv (matplotlib lives here; system python stays clean)
+analyze/.venv/
+
+# Machine-local Claude Code settings (never shared)
+.claude/settings.local.json
+
+# Python / OS cruft
+__pycache__/
+*.pyc
+.DS_Store

@@ -203,6 +203,13 @@ def main():
             "bench_core": to_int(meta.get("BENCH_CORE")),
             "pinned": pinned,
             "taskset_cmd": meta.get("TASKSET_CMD", ""),
+            # Per-op sizing. In auto-calibration mode warmup_iters/timed_iters are
+            # chosen per operation (see each entry under kem/sig "operations");
+            # the run-level target/min/max below describe how they were derived.
+            "calibration_mode": meta.get("CALIB_MODE", "auto"),
+            "target_time_ms": to_int(meta.get("TARGET_TIME_MS")),
+            "min_samples": to_int(meta.get("MIN_SAMPLES")),
+            "max_iters": to_int(meta.get("MAX_ITERS")),
             "warmup_iters": to_int(meta.get("WARMUP")),
             "timed_iters": to_int(meta.get("ITERS")),
             "repetitions": to_int(meta.get("REPS")),

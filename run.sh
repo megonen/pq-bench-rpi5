@@ -51,15 +51,30 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- measurement knobs (config.yaml, overridable) --------------------------
+# Sets TARGET_TIME_MS MIN_SAMPLES MAX_ITERS REPS CYCLES_MODE (auto-calibration,
+# the default path) plus WARMUP ITERS (the fixed-count fallback).
 eval "$(python3 "$ROOT/bench/lib/list_algs.py" measurement "$ROOT/config.yaml")"
-[ -n "$OVR_ITERS" ]  && ITERS="$OVR_ITERS"
+
+# Mode: auto-calibrate per op (default) unless --iters forces a fixed count.
+CALIB_MODE="auto"
+if [ -n "$OVR_ITERS" ]; then CALIB_MODE="fixed"; ITERS="$OVR_ITERS"; fi
 [ -n "$OVR_WARMUP" ] && WARMUP="$OVR_WARMUP"
 [ -n "$OVR_REPS" ]   && REPS="$OVR_REPS"
 if [ "$SMOKE" = 1 ]; then
-  # Deliberately tiny so the whole sweep (incl. slow SLH-DSA signing) finishes
-  # in well under a minute. This is a pipeline test, NOT measurement data.
-  WARMUP=5; ITERS=25; REPS=1
-  pqb_warn "SMOKE MODE: tiny iteration counts — pipeline test only, NOT measurement data"
+  # Keep auto-calibration (so each op still reaches target) but a single rep, so
+  # the sweep stays short. This is a pipeline test, NOT measurement data.
+  REPS=1
+  pqb_warn "SMOKE MODE: reps=1 — pipeline test only, NOT measurement data"
+fi
+
+# Assemble the per-op sizing args passed to every bench_pq invocation.
+if [ "$CALIB_MODE" = "fixed" ]; then
+  BENCH_SIZE_ARGS=(--warmup "$WARMUP" --iters "$ITERS" --reps "$REPS")
+  pqb_log "sizing: FIXED-count warmup=$WARMUP iters=$ITERS reps=$REPS"
+else
+  BENCH_SIZE_ARGS=(--target-time-ms "$TARGET_TIME_MS" --min-samples "$MIN_SAMPLES" \
+                   --max-iters "$MAX_ITERS" --reps "$REPS")
+  pqb_log "sizing: AUTO-calibrate target=${TARGET_TIME_MS}ms min_samples=$MIN_SAMPLES max_iters=$MAX_ITERS reps=$REPS"
 fi
 BENCH_CORE="${BENCH_CORE:-3}"
 export PQB_BENCH_CORE="$BENCH_CORE"
@@ -131,14 +146,18 @@ fi
 # ---- KEM/sig sweep ---------------------------------------------------------
 CYCLES_AVAILABLE=0; CYCLES_REASON="not probed"
 if [ "$DO_KEMSIG" = 1 ]; then
-  pqb_log "running KEM/sig sweep (warmup=$WARMUP iters=$ITERS reps=$REPS)"
+  if [ "$CALIB_MODE" = "fixed" ]; then
+    pqb_log "running KEM/sig sweep (fixed: warmup=$WARMUP iters=$ITERS reps=$REPS)"
+  else
+    pqb_log "running KEM/sig sweep (auto-calibrate: target=${TARGET_TIME_MS}ms min_samples=$MIN_SAMPLES max_iters=$MAX_ITERS reps=$REPS)"
+  fi
   while IFS=$'\t' read -r kind alg classical; do
     [ -z "$alg" ] && continue
     pqb_log "  $kind $alg"
     ERRF="$WORK/err.$kind.$alg.txt"
     # shellcheck disable=SC2086
     if $TASKSET "$ROOT/bench/kem_sig/bench_pq" --kind "$kind" --alg "$alg" \
-        --warmup "$WARMUP" --iters "$ITERS" --reps "$REPS" >> "$KEMSIG_OUT" 2>"$ERRF"; then
+        "${BENCH_SIZE_ARGS[@]}" >> "$KEMSIG_OUT" 2>"$ERRF"; then
       :
     else
       add_warn "harness failed for $kind $alg (see $ERRF)"
@@ -216,9 +235,20 @@ collect_host_facts() {
     echo "BENCH_CORE=$BENCH_CORE"
     echo "PINNED=$PINNED"
     echo "TASKSET_CMD=\"$TASKSET\""
-    echo "WARMUP=$WARMUP"
-    echo "ITERS=$ITERS"
+    echo "CALIB_MODE=$CALIB_MODE"
+    echo "TARGET_TIME_MS=$TARGET_TIME_MS"
+    echo "MIN_SAMPLES=$MIN_SAMPLES"
+    echo "MAX_ITERS=$MAX_ITERS"
     echo "REPS=$REPS"
+    # warmup/timed_iters are single values only in fixed-count mode; in auto mode
+    # they are chosen per-op and recorded in each operation's JSON instead.
+    if [ "$CALIB_MODE" = "fixed" ]; then
+      echo "WARMUP=$WARMUP"
+      echo "ITERS=$ITERS"
+    else
+      echo "WARMUP="
+      echo "ITERS="
+    fi
     echo "CYCLES_MODE=$CYCLES_MODE"
     echo "CYCLES_AVAILABLE=$CYCLES_AVAILABLE"
     echo "CYCLES_REASON=\"$CYCLES_REASON\""

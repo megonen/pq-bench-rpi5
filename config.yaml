@@ -11,12 +11,25 @@
 # or check the dashboard's "available algorithms" note after a run.
 # =============================================================================
 
-# ---- measurement knobs (overridable on the CLI: ./run.sh --iters 50000) ----
+# ---- measurement knobs ------------------------------------------------------
+# Default sizing is PER-OPERATION AUTO-CALIBRATION: each op (keygen/encaps/sign/
+# ...) is timed long enough to accumulate ~target_time_ms of work, clamped to
+# [min_samples, max_iters]. This makes an 18 us ML-KEM keygen and a ~750 ms
+# SLH-DSA sign both yield a stable median without a hand-tuned per-alg count:
+#   - fast ops are bounded by max_iters
+#   - slow ops are bounded by min_samples (so even ~1 op per target still gets
+#     enough samples for a stable median/MAD)
+# To force FIXED counts instead, pass `./run.sh --iters N` — that disables
+# calibration and uses the warmup_iters/timed_iters fallback below.
 measurement:
-  warmup_iters: 1000        # untimed iterations to settle caches/branch predictors
-  timed_iters: 10000        # timed iterations per repetition
+  target_time_ms: 250       # auto: aggregate timed work to put on each op
+  min_samples: 30           # auto: floor on timed iters/rep (stable median+MAD)
+  max_iters: 20000          # auto: ceiling on timed iters/rep (caps fast ops)
   repetitions: 5            # independent repetitions (fresh process each time)
   cycles_mode: auto         # auto | on | off  (PMU userspace cycle counting)
+  # ---- fixed-count fallback (only used when ./run.sh --iters is given) ----
+  warmup_iters: 1000        # untimed iterations to settle caches/branch predictors
+  timed_iters: 10000        # timed iterations per repetition
 
 # ---- KEMs ------------------------------------------------------------------
 # baseline = the classical reference Logos uses TODAY (drawn on every chart).

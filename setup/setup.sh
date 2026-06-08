@@ -110,7 +110,11 @@ locate_or_build_openssl() {
     for cand in "$(command -v openssl || true)" /opt/homebrew/opt/openssl@3/bin/openssl /usr/bin/openssl; do
       [ -x "$cand" ] || continue
       local v; v="$("$cand" version 2>/dev/null | awk '{print $2}')"
-      local maj="${v%%.*}" rest="${v#*.}" min="${rest%%.*}"
+      # NB: assign on separate lines. A single `local a=.. b=.. c="${b..}"` makes
+      # bash 5.2 declare all names (unset) *before* expanding any RHS, so the
+      # reference to `rest` here trips `set -u` (unbound variable) on the Pi.
+      local maj rest min
+      maj="${v%%.*}"; rest="${v#*.}"; min="${rest%%.*}"
       if [ "${maj:-0}" -gt "$want_major" ] 2>/dev/null || \
          { [ "${maj:-0}" -eq "$want_major" ] && [ "${min:-0}" -ge "$want_minor" ]; } 2>/dev/null; then
         OPENSSL_BIN="$cand"

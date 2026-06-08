@@ -213,10 +213,13 @@ pqb_install_build_deps() {
       pqb_log "installing build deps via apt"
       local SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
       $SUDO apt-get update -qq
+      # linux-cpupower provides the `cpupower` binary used by
+      # pqb_set_governor_performance. (Older releases shipped cpufrequtils, which
+      # was dropped in Debian 13/trixie — cpupower is the supported replacement.)
       $SUDO apt-get install -y -qq \
         build-essential cmake ninja-build git python3 perl \
         libssl-dev pkg-config astyle doxygen \
-        cpufrequtils util-linux >/dev/null
+        linux-cpupower util-linux >/dev/null
     else
       pqb_warn "no apt-get found; install cmake/ninja/gcc/libssl-dev manually"
     fi

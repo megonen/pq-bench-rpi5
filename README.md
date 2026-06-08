@@ -183,6 +183,93 @@ harness skips anything your liboqs build doesn't enable (and says so).
 
 ---
 
+## Contributing your RPi5 results
+
+The whole point is a **shared, aggregated baseline**: the more Raspberry Pi 5
+results we collect under identical conditions, the more confident the migration-
+cost picture. If you have a Pi 5, please contribute a run — it takes one command
+and a pull request.
+
+### 1. Run under baseline conditions
+
+For your numbers to count as baseline-grade, the run must satisfy the
+`is_baseline_grade` gate (real Pi 5 · `performance` governor · core-pinned ·
+`cortex-a76` flags · no thermal throttling). To give it the best shot:
+
+- **Use a Raspberry Pi 5** with active cooling (the official Active Cooler or a
+  fan). PQ signing (esp. SLH-DSA) runs the core hot for a while; without cooling
+  you *will* throttle and the run is flagged non-baseline.
+- **Use the official 27 W USB-C PSU.** Under-voltage also trips the throttle flag.
+- **Run on a quiet machine** (close other workloads) so core 3 stays clean.
+- **Don't edit `config.yaml`'s candidate list** if you want your run to be
+  directly comparable to others. (Extending it is fine — just say so in your PR;
+  extra algorithms simply add columns.)
+
+```bash
+git clone <this repo> && cd pq-bench-rpi5
+./setup/setup.sh                 # build + pin liboqs / OpenSSL 3.5+ / oqs-provider
+sudo ./run.sh                    # sudo lets it set the performance governor
+```
+
+A full run takes a while (SLH-DSA signing dominates). To check the pipeline
+first without committing to the full run, use `sudo ./run.sh --smoke` — but only
+a **full** run (not `--smoke`) counts as a submission.
+
+### 2. Confirm it's baseline-grade
+
+When the run finishes, the summary prints `baseline-grade (RPi5): True`. Verify
+in the JSON too:
+
+```bash
+f=$(ls -t results/*.json | head -1)
+python3 -c "import json;d=json.load(open('$f'));print('baseline_grade:',d['is_baseline_grade']);\
+print('reasons:',d['baseline_grade_reasons']);\
+print('throttled:',d['thermal_trace']['throttling_detected']);\
+print('aarch64 ML-KEM backend:', 'ml_kem_768_aarch64 1' in d['toolchain']['liboqs_opt_defines'])"
+```
+
+You want `baseline_grade: True`, `reasons: []`, `throttled: False`, and the
+backend line `True`. If `is_baseline_grade` is false, the printed reasons tell
+you what to fix (usually cooling/PSU/governor) — fix and re-run.
+
+### 3. Submit it
+
+Your `results/<hostname>-<timestamp>.json` is fully self-describing (host model,
+kernel, OS, governor, clock/temp trace, compiler + liboqs/oqs-provider/OpenSSL
+commits, build flags). It contains your **hostname** and Pi model and nothing
+else identifying — if you'd rather not share the hostname, set a name first with
+`HOSTNAME=mypi5 sudo ./run.sh`, or just rename the file before submitting.
+
+`results/*.json` is git-ignored by default (so you never accidentally commit
+local experiments), so add yours explicitly:
+
+```bash
+git checkout -b results/<your-handle>-pi5
+git add -f results/<hostname>-<timestamp>.json
+git commit -m "results: RPi5 baseline from <your-handle>"
+# push to your fork and open a PR
+```
+
+**PR checklist** (maintainers will look for these):
+
+- [ ] `is_baseline_grade: true` with empty `baseline_grade_reasons`
+- [ ] `thermal_trace.throttling_detected: false`
+- [ ] `host.is_rpi: true` and `host.rpi_model` mentions "Raspberry Pi 5"
+- [ ] `run.governor_after: performance` and `run.pinned: true`
+- [ ] `toolchain.cflags_target: cortex-a76`
+- [ ] full run (not `--smoke`): `run.timed_iters` is the `config.yaml` value, not 25
+- [ ] unmodified candidate list (or extensions noted in the PR description)
+
+Once merged, your file joins `results/`; anyone can regenerate the aggregated
+dataset and dashboard with
+`python3 analyze/merge.py results/*.json -o dashboard/data/merged.json`. The
+dashboard's run selector will then include your Pi alongside everyone else's.
+
+> Prefer not to use GitHub? Open an issue and attach the JSON file instead — a
+> maintainer will add it.
+
+---
+
 ## Limitations
 
 - **macOS is smoke-only** (see above): coarse timer, no governor/pinning,

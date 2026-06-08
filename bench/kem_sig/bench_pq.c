@@ -210,11 +210,50 @@ static int measure_op(op_fn fn, void *ctx,
     return 0;
 }
 
+/* ---- anti-DCE sink + fatal helpers -------------------------------------- */
+/* File-scope volatile: the compiler must materialize every store, so it cannot
+ * dead-code-eliminate the crypto outputs we feed into it. Every timed op sinks
+ * one output byte here. */
+static volatile uint64_t g_sink = 0;
+
+/* Abort the whole run: a broken build must NEVER silently emit timing numbers. */
+static void die(const char *alg, const char *what) {
+    fprintf(stderr, "[bench_pq] FATAL: %s: %s — aborting so no numbers are emitted\n",
+            alg, what);
+    exit(3);
+}
+
+/* measure_op wrapper: if any timed op ever returns failure (e.g. a verify that
+ * stopped succeeding), abort instead of reading freed/partial buffers. */
+static void must_measure(const char *alg, const char *op, op_fn fn, void *ctx,
+                         uint64_t w, uint64_t it, uint64_t r, measure_out *out) {
+    if (measure_op(fn, ctx, w, it, r, out) != 0)
+        die(alg, op);
+}
+
+#define MSGLEN 32
+
 /* ======================= liboqs KEM ====================================== */
-typedef struct { OQS_KEM *kem; uint8_t *pk,*sk,*ct,*ss; } kem_ctx;
-static int kem_keygen(void *c){ kem_ctx*x=c; return OQS_KEM_keypair(x->kem,x->pk,x->sk)==OQS_SUCCESS?0:1; }
-static int kem_encaps(void *c){ kem_ctx*x=c; return OQS_KEM_encaps(x->kem,x->ct,x->ss,x->pk)==OQS_SUCCESS?0:1; }
-static int kem_decaps(void *c){ kem_ctx*x=c; return OQS_KEM_decaps(x->kem,x->ss,x->ct,x->sk)==OQS_SUCCESS?0:1; }
+/* Timed ops consume canonical, pre-validated inputs; keygen/encaps write to
+ * scratch buffers so they never clobber the matched (pk,sk,ct) that the other
+ * timed ops depend on. Each op sinks an output byte into g_sink. */
+typedef struct {
+    OQS_KEM *kem;
+    uint8_t *pk, *sk;     /* canonical matched keypair (encaps/decaps inputs) */
+    uint8_t *ct;          /* canonical ciphertext (decaps input)             */
+    uint8_t *pk_s, *sk_s; /* scratch: keygen outputs                          */
+    uint8_t *ct_s, *ss_s; /* scratch: encaps outputs                          */
+    uint8_t *ss_d;        /* scratch: decaps output                           */
+} kem_ctx;
+static int kem_keygen(void *c){ kem_ctx*x=c;
+    if (OQS_KEM_keypair(x->kem, x->pk_s, x->sk_s) != OQS_SUCCESS) return 1;
+    g_sink += x->pk_s[0]; return 0; }
+static int kem_encaps(void *c){ kem_ctx*x=c;
+    if (OQS_KEM_encaps(x->kem, x->ct_s, x->ss_s, x->pk) != OQS_SUCCESS) return 1;
+    g_sink += (uint64_t)x->ss_s[0] ^ x->ct_s[0]; return 0; }
+static int kem_decaps(void *c){ kem_ctx*x=c;
+    if (OQS_KEM_decaps(x->kem, x->ss_d, x->ct, x->sk) != OQS_SUCCESS) return 1;
+    g_sink += x->ss_d[0]; return 0; }
 
 static int run_kem(const char *alg, uint64_t warmup, uint64_t iters, uint64_t reps) {
     OQS_KEM *kem = OQS_KEM_new(alg);
@@ -223,17 +262,29 @@ static int run_kem(const char *alg, uint64_t warmup, uint64_t iters, uint64_t re
                "\"reason\":\"not enabled in this liboqs build\"}\n", alg);
         return 0;
     }
-    kem_ctx x = {kem,
-        malloc(kem->length_public_key), malloc(kem->length_secret_key),
-        malloc(kem->length_ciphertext), malloc(kem->length_shared_secret)};
-    /* prime pk/sk so encaps/decaps have valid inputs */
-    OQS_KEM_keypair(kem, x.pk, x.sk);
-    OQS_KEM_encaps(kem, x.ct, x.ss, x.pk);
+    kem_ctx x; memset(&x, 0, sizeof x); x.kem = kem;
+    x.pk   = malloc(kem->length_public_key);  x.sk   = malloc(kem->length_secret_key);
+    x.ct   = malloc(kem->length_ciphertext);
+    x.pk_s = malloc(kem->length_public_key);  x.sk_s = malloc(kem->length_secret_key);
+    x.ct_s = malloc(kem->length_ciphertext);
+    x.ss_s = malloc(kem->length_shared_secret);
+    x.ss_d = malloc(kem->length_shared_secret);
+    if (!x.pk||!x.sk||!x.ct||!x.pk_s||!x.sk_s||!x.ct_s||!x.ss_s||!x.ss_d) die(alg,"out of memory");
 
+    /* ---- correctness check (ONCE, outside the timed loop) ----
+     * keygen -> encaps -> decaps, then assert the shared secrets match. */
+    if (OQS_KEM_keypair(kem, x.pk, x.sk) != OQS_SUCCESS) die(alg, "keygen failed");
+    if (OQS_KEM_encaps(kem, x.ct, x.ss_s, x.pk) != OQS_SUCCESS) die(alg, "encaps failed");
+    if (OQS_KEM_decaps(kem, x.ss_d, x.ct, x.sk) != OQS_SUCCESS) die(alg, "decaps failed");
+    if (memcmp(x.ss_s, x.ss_d, kem->length_shared_secret) != 0)
+        die(alg, "KEM shared-secret mismatch (ss_encaps != ss_decaps)");
+
+    /* timed phases run on the canonical, validated (pk,sk,ct); any op failure
+     * during timing aborts via must_measure. */
     measure_out kg={0}, en={0}, de={0};
-    measure_op(kem_keygen,&x,warmup,iters,reps,&kg);
-    measure_op(kem_encaps,&x,warmup,iters,reps,&en);
-    measure_op(kem_decaps,&x,warmup,iters,reps,&de);
+    must_measure(alg,"keygen",kem_keygen,&x,warmup,iters,reps,&kg);
+    must_measure(alg,"encaps",kem_encaps,&x,warmup,iters,reps,&en);
+    must_measure(alg,"decaps",kem_decaps,&x,warmup,iters,reps,&de);
 
     printf("{\"alg\":\"%s\",\"kind\":\"kem\",\"backend\":\"liboqs\",\"enabled\":true,", alg);
     printf("\"claimed_nist_level\":%d,", kem->claimed_nist_level);
@@ -247,16 +298,33 @@ static int run_kem(const char *alg, uint64_t warmup, uint64_t iters, uint64_t re
     printf("}}\n");
 
     free(kg.all); free(en.all); free(de.all);
-    free(x.pk); free(x.sk); free(x.ct); free(x.ss);
+    free(x.pk); free(x.sk); free(x.ct);
+    free(x.pk_s); free(x.sk_s); free(x.ct_s); free(x.ss_s); free(x.ss_d);
     OQS_KEM_free(kem);
     return 0;
 }
 
 /* ======================= liboqs SIG ====================================== */
-typedef struct { OQS_SIG *sig; uint8_t *pk,*sk,*msg,*signature; size_t siglen; } sig_ctx;
-static int sig_keygen(void *c){ sig_ctx*x=c; return OQS_SIG_keypair(x->sig,x->pk,x->sk)==OQS_SUCCESS?0:1; }
-static int sig_sign(void *c){ sig_ctx*x=c; return OQS_SIG_sign(x->sig,x->signature,&x->siglen,x->msg,32,x->sk)==OQS_SUCCESS?0:1; }
-static int sig_verify(void *c){ sig_ctx*x=c; return OQS_SIG_verify(x->sig,x->msg,32,x->signature,x->siglen,x->pk)==OQS_SUCCESS?0:1; }
+/* sign writes a scratch signature; verify reads the canonical (sg,sglen) over
+ * the canonical msg with the canonical pk — all pre-validated. */
+typedef struct {
+    OQS_SIG *sig;
+    uint8_t *pk, *sk;      /* canonical keypair (sign/verify inputs) */
+    uint8_t *msg;          /* canonical message                      */
+    uint8_t *sg; size_t sglen;     /* canonical signature (verify input) */
+    uint8_t *pk_s, *sk_s;  /* scratch: keygen outputs                */
+    uint8_t *sg_s; size_t sg_s_len;/* scratch: sign output           */
+} sig_ctx;
+static int sig_keygen(void *c){ sig_ctx*x=c;
+    if (OQS_SIG_keypair(x->sig, x->pk_s, x->sk_s) != OQS_SUCCESS) return 1;
+    g_sink += x->pk_s[0]; return 0; }
+static int sig_sign(void *c){ sig_ctx*x=c;
+    x->sg_s_len = x->sig->length_signature;
+    if (OQS_SIG_sign(x->sig, x->sg_s, &x->sg_s_len, x->msg, MSGLEN, x->sk) != OQS_SUCCESS) return 1;
+    g_sink += x->sg_s[0]; return 0; }
+static int sig_verify(void *c){ sig_ctx*x=c;
+    if (OQS_SIG_verify(x->sig, x->msg, MSGLEN, x->sg, x->sglen, x->pk) != OQS_SUCCESS) return 1;
+    g_sink += 1; return 0; }
 
 static int run_sig(const char *alg, uint64_t warmup, uint64_t iters, uint64_t reps) {
     OQS_SIG *sig = OQS_SIG_new(alg);
@@ -265,19 +333,27 @@ static int run_sig(const char *alg, uint64_t warmup, uint64_t iters, uint64_t re
                "\"reason\":\"not enabled in this liboqs build\"}\n", alg);
         return 0;
     }
-    sig_ctx x; memset(&x,0,sizeof x);
-    x.sig=sig;
-    x.pk=malloc(sig->length_public_key); x.sk=malloc(sig->length_secret_key);
-    x.signature=malloc(sig->length_signature); x.msg=malloc(32);
-    memset(x.msg,0xA5,32);
-    OQS_SIG_keypair(sig,x.pk,x.sk);
-    x.siglen=sig->length_signature;
-    OQS_SIG_sign(sig,x.signature,&x.siglen,x.msg,32,x.sk);
+    sig_ctx x; memset(&x,0,sizeof x); x.sig=sig;
+    x.pk   = malloc(sig->length_public_key);  x.sk   = malloc(sig->length_secret_key);
+    x.msg  = malloc(MSGLEN);
+    x.sg   = malloc(sig->length_signature);
+    x.pk_s = malloc(sig->length_public_key);  x.sk_s = malloc(sig->length_secret_key);
+    x.sg_s = malloc(sig->length_signature);
+    if (!x.pk||!x.sk||!x.msg||!x.sg||!x.pk_s||!x.sk_s||!x.sg_s) die(alg,"out of memory");
+    memset(x.msg, 0xA5, MSGLEN);
+
+    /* ---- correctness check (ONCE, outside the timed loop) ----
+     * keygen -> sign -> verify; the verify MUST succeed on a valid signature. */
+    if (OQS_SIG_keypair(sig, x.pk, x.sk) != OQS_SUCCESS) die(alg, "keygen failed");
+    x.sglen = sig->length_signature;
+    if (OQS_SIG_sign(sig, x.sg, &x.sglen, x.msg, MSGLEN, x.sk) != OQS_SUCCESS) die(alg, "sign failed");
+    if (OQS_SIG_verify(sig, x.msg, MSGLEN, x.sg, x.sglen, x.pk) != OQS_SUCCESS)
+        die(alg, "signature verify failed on a valid signature (broken build)");
 
     measure_out kg={0}, sg={0}, vf={0};
-    measure_op(sig_keygen,&x,warmup,iters,reps,&kg);
-    measure_op(sig_sign,&x,warmup,iters,reps,&sg);
-    measure_op(sig_verify,&x,warmup,iters,reps,&vf);
+    must_measure(alg,"keygen",sig_keygen,&x,warmup,iters,reps,&kg);
+    must_measure(alg,"sign",  sig_sign,  &x,warmup,iters,reps,&sg);
+    must_measure(alg,"verify",sig_verify,&x,warmup,iters,reps,&vf);
 
     printf("{\"alg\":\"%s\",\"kind\":\"sig\",\"backend\":\"liboqs\",\"enabled\":true,", alg);
     printf("\"claimed_nist_level\":%d,", sig->claimed_nist_level);
@@ -291,7 +367,8 @@ static int run_sig(const char *alg, uint64_t warmup, uint64_t iters, uint64_t re
     printf("}}\n");
 
     free(kg.all); free(sg.all); free(vf.all);
-    free(x.pk); free(x.sk); free(x.signature); free(x.msg);
+    free(x.pk); free(x.sk); free(x.msg); free(x.sg);
+    free(x.pk_s); free(x.sk_s); free(x.sg_s);
     OQS_SIG_free(sig);
     return 0;
 }
@@ -308,30 +385,46 @@ static int x25519_keygen(void *c){
     EVP_PKEY_CTX_free(p);
     return ok?0:1;
 }
+/* derive shared secret a·b into out[32]; returns 1 on success */
+static int x25519_derive_into(EVP_PKEY *a, EVP_PKEY *b, unsigned char out[32]){
+    EVP_PKEY_CTX *p = EVP_PKEY_CTX_new(a,NULL);
+    if(!p) return 0;
+    size_t slen=32;
+    int ok = EVP_PKEY_derive_init(p)>0 &&
+             EVP_PKEY_derive_set_peer(p,b)>0 &&
+             EVP_PKEY_derive(p,out,&slen)>0;
+    EVP_PKEY_CTX_free(p);
+    return ok;
+}
 static int x25519_derive(void *c){
     x25519_ctx*x=c;
-    EVP_PKEY_CTX *p = EVP_PKEY_CTX_new(x->self,NULL);
-    if(!p) return 1;
-    unsigned char secret[32]; size_t slen=sizeof secret;
-    int ok = EVP_PKEY_derive_init(p)>0 &&
-             EVP_PKEY_derive_set_peer(p,x->peer)>0 &&
-             EVP_PKEY_derive(p,secret,&slen)>0;
-    EVP_PKEY_CTX_free(p);
-    return ok?0:1;
+    unsigned char secret[32];
+    if(!x25519_derive_into(x->self,x->peer,secret)) return 1;
+    g_sink += secret[0];           /* sink the derived shared secret */
+    return 0;
 }
 
 static int run_x25519(uint64_t warmup, uint64_t iters, uint64_t reps) {
     x25519_ctx x={0};
-    x25519_keygen(&x);                 /* self */
+    if (x25519_keygen(&x) != 0) die("X25519","keygen failed");   /* self */
     /* a fixed peer key for derive */
     EVP_PKEY_CTX *p = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519,NULL);
-    EVP_PKEY_keygen_init(p); EVP_PKEY_keygen(p,&x.peer); EVP_PKEY_CTX_free(p);
+    if(!p || EVP_PKEY_keygen_init(p)<=0 || EVP_PKEY_keygen(p,&x.peer)<=0) die("X25519","peer keygen failed");
+    EVP_PKEY_CTX_free(p);
+
+    /* ---- correctness check (ONCE, outside timing): ECDH must agree ---- */
+    {
+        unsigned char sa[32], sb[32];
+        if (!x25519_derive_into(x.self, x.peer, sa)) die("X25519","derive(self,peer) failed");
+        if (!x25519_derive_into(x.peer, x.self, sb)) die("X25519","derive(peer,self) failed");
+        if (memcmp(sa, sb, 32) != 0) die("X25519","ECDH shared-secret mismatch");
+    }
 
     measure_out kg={0}, dv={0};
-    measure_op(x25519_keygen,&x,warmup,iters,reps,&kg);
+    must_measure("X25519","keygen",x25519_keygen,&x,warmup,iters,reps,&kg);
     /* keygen frees+replaces self each call; re-make a stable self for derive */
-    x25519_keygen(&x);
-    measure_op(x25519_derive,&x,warmup,iters,reps,&dv);
+    if (x25519_keygen(&x) != 0) die("X25519","keygen failed");
+    must_measure("X25519","derive",x25519_derive,&x,warmup,iters,reps,&dv);
 
     printf("{\"alg\":\"X25519\",\"kind\":\"kem\",\"backend\":\"openssl\",\"classical\":true,\"enabled\":true,");
     printf("\"claimed_nist_level\":1,");
@@ -364,7 +457,9 @@ static int ed_sign(void *c){
     int ok = EVP_DigestSignInit(m,NULL,NULL,NULL,x->key)>0 &&
              EVP_DigestSign(m,x->sig,&x->siglen,x->msg,sizeof x->msg)>0;
     EVP_MD_CTX_free(m);
-    return ok?0:1;
+    if(!ok) return 1;
+    g_sink += x->sig[0];           /* sink the signature */
+    return 0;
 }
 static int ed_verify(void *c){
     ed_ctx*x=c;
@@ -372,17 +467,24 @@ static int ed_verify(void *c){
     int ok = EVP_DigestVerifyInit(m,NULL,NULL,NULL,x->key)>0 &&
              EVP_DigestVerify(m,x->sig,x->siglen,x->msg,sizeof x->msg)>0;
     EVP_MD_CTX_free(m);
-    return ok?0:1;
+    if(!ok) return 1;
+    g_sink += 1;                   /* sink the (successful) verify result */
+    return 0;
 }
 
 static int run_ed25519(uint64_t warmup, uint64_t iters, uint64_t reps) {
     ed_ctx x; memset(&x,0,sizeof x); memset(x.msg,0xA5,sizeof x.msg);
-    ed_keygen(&x); ed_sign(&x);
+
+    /* ---- correctness check (ONCE, outside timing): verify MUST succeed ---- */
+    if (ed_keygen(&x) != 0) die("Ed25519","keygen failed");
+    if (ed_sign(&x)   != 0) die("Ed25519","sign failed");
+    if (ed_verify(&x) != 0) die("Ed25519","verify failed on a valid signature (broken build)");
+
     measure_out kg={0}, sg={0}, vf={0};
-    measure_op(ed_keygen,&x,warmup,iters,reps,&kg);
-    ed_keygen(&x); ed_sign(&x);   /* stable key+sig for sign/verify timing */
-    measure_op(ed_sign,&x,warmup,iters,reps,&sg);
-    measure_op(ed_verify,&x,warmup,iters,reps,&vf);
+    must_measure("Ed25519","keygen",ed_keygen,&x,warmup,iters,reps,&kg);
+    if (ed_keygen(&x)!=0 || ed_sign(&x)!=0) die("Ed25519","re-priming key+sig failed");
+    must_measure("Ed25519","sign",  ed_sign,  &x,warmup,iters,reps,&sg);
+    must_measure("Ed25519","verify",ed_verify,&x,warmup,iters,reps,&vf);
 
     printf("{\"alg\":\"Ed25519\",\"kind\":\"sig\",\"backend\":\"openssl\",\"classical\":true,\"enabled\":true,");
     printf("\"claimed_nist_level\":1,");

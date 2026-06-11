@@ -11,10 +11,15 @@ bench/tls/bench_tls
 # Generated TLS material
 bench/tls/pki/
 
+# Per-run scratch dirs (intermediate artifacts; never committed)
+results/.work-*/
+
 # Local results are kept by users, not committed by default.
 # Comment the next line out if you DO want to commit your machine's results.
 results/*.json
 !results/example-*.json
+# Published baseline-grade RPi5 run (auto-calibrated full run)
+!results/rasberrypi5-20260608T223040Z.json
 
 # Merged dataset consumed by the dashboard
 dashboard/data/merged.json

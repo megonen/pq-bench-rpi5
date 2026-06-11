@@ -128,6 +128,69 @@ into every results file under `toolchain.liboqs_opt_defines`.
 
 ---
 
+## Methodology & trustworthiness (verify it yourself)
+
+Every claim below points at the exact code so you can read it, not take our word.
+All `bench_pq.c` references are `bench/kem_sig/bench_pq.c`.
+
+1. **Correctness gate — broken crypto emits *zero* numbers.** Before any timing,
+   each algorithm runs a full round-trip and asserts it: for KEM,
+   keygen→encaps→decaps then `memcmp(ss_encaps, ss_decaps)`
+   (`bench_pq.c:357-363`); for signatures, keygen→sign→`verify` must succeed
+   (`bench_pq.c:428-434`). On any failure, `die()` prints to **stderr** and
+   `exit(3)` (`bench_pq.c:303-307`) — and the JSON is only printed *after* all
+   measurement (`bench_pq.c:372-381`), so a failed gate yields **no stdout at
+   all**. The gate runs once, *outside* the timed loop. A runtime guard
+   (`must_measure`, `bench_pq.c:311-315`) also aborts if a timed op ever fails
+   mid-run. *Verify it:* flip one byte of the decaps shared secret right before
+   `bench_pq.c:362`, rebuild, run — the process exits `3` with empty stdout.
+
+2. **No dead-code elimination — the `volatile` sink.** At `-O3` the compiler may
+   delete work whose result is never observed. Each timed op folds an output
+   byte into a file-scope `volatile uint64_t g_sink` (`bench_pq.c:300`; uses at
+   `:333,:336,:339,:407,:410,:486`), forcing the store to be materialized so the
+   crypto call **cannot** be optimized away. Without it the loop could time
+   nothing and report meaningless near-zero numbers.
+
+3. **What is timed — only the op, never setup.** The timed region brackets a
+   single `fn(ctx)` call between two `now_ns()` reads (`bench_pq.c:274-281`);
+   per-rep warmup runs *outside* it (`bench_pq.c:272-273`). Inputs are canonical
+   and pre-validated, so e.g. KEM decaps (`bench_pq.c:337-339`) times one
+   `OQS_KEM_decaps` and nothing else. For the X25519 baseline, keygen is timed
+   separately (`bench_pq.c:507`), a stable key is re-primed *outside* timing
+   (`bench_pq.c:509`), then derive is timed alone (`bench_pq.c:510`) — setup is
+   never folded into a measured number.
+
+4. **Per-op auto-calibration with clamps.** `calibrate_op` (`bench_pq.c:209-250`)
+   runs a doubling probe (`:223-230`, also cache warmup) to estimate per-op cost
+   `est_ns` (`:231`), then picks iterations to hit `target_time_ms` of real work
+   (`:234-235`), clamped to `[min_samples, max_iters]` (`:236-237`). So a fast
+   18 µs keygen and a 0.74 s SLH-DSA sign each get the iteration count *they*
+   need: slow ops floor at `min_samples` (30), fast ops ceil at `max_iters`
+   (20000). The chosen `timed_iters` and `calib_est_ns` are recorded per op.
+
+5. **Robust statistics — median + MAD.** `compute_stats` (`bench_pq.c:111-146`)
+   reports median, MAD, IQR, q1/q3, min, max, mean, stddev, ops/sec, plus
+   per-repetition medians (`print_stats_json`, `bench_pq.c:184-203`). The
+   headline metric is the **median**, with **MAD** as spread: timing
+   distributions are right-skewed with a hard floor (true cost) and a long tail
+   of OS-scheduling/interrupt contamination that drags mean/stddev but not
+   median/MAD. Mean and stddev are kept in the JSON so the skew is visible. The
+   clock is `clock_gettime(CLOCK_MONOTONIC)` (`bench_pq.c:44-48`); userspace PMU
+   cycles are probed and honestly reported absent when they trap
+   (`probe_pmu`, `bench_pq.c:66-86`).
+
+6. **`is_baseline_grade` demerit gate.** Computed in
+   `bench/lib/assemble.py:155-168` as a demerit accumulator — the flag is `true`
+   only if *every* condition holds: real Pi (`:157`), `performance` governor
+   (`:160`), core-pinned (`:162`), `cortex-a76` build flags (`:164`), and no
+   thermal throttling (`:166`). Throttling is read from `vcgencmd get_throttled`
+   bits 2/18 plus a clock-droop heuristic (`assemble.py:91-98,:110-113`). Any
+   failure appends a human-readable reason and flips the flag to `false`; the
+   dashboard and `plot.py` default to baseline-grade runs only.
+
+---
+
 ## Reproducibility & provenance
 
 - **Pinned versions** live in `setup/versions.env` (liboqs `0.15.0`, OpenSSL

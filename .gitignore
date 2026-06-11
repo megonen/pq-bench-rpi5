@@ -21,8 +21,9 @@ results/*.json
 # Published baseline-grade RPi5 run (auto-calibrated full run)
 !results/rasberrypi5-20260608T223040Z.json
 
-# Merged dataset consumed by the dashboard
-dashboard/data/merged.json
+# Merged dataset consumed by the dashboard. Tracked: ships the published RPi5
+# baseline so a fresh clone renders charts out-of-the-box. Contributors who
+# re-merge overwrite it locally (modified file they can commit or discard).
 analyze/png/
 
 # Python venv (matplotlib lives here; system python stays clean)

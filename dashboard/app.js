@@ -9,6 +9,45 @@ let MERGED = null, CHARTS = [];
 
 const $ = (id) => document.getElementById(id);
 const nsToMs = (ns) => (ns || 0) / 1e6;
+/* compact ms label: more decimals for small values, fewer for large. Guards its
+ * input — Chart.js may hand a value-label formatter a parsed {x,y} point or a
+ * non-number; extract the numeric value without coercing an object (Number() on
+ * a null-prototype object would itself throw), and return "" for anything not
+ * finite so the value-label draw never throws and halts later charts. */
+const fmtMs = (v) => {
+  const ms = typeof v === "number" ? v
+           : (v && typeof v === "object") ? (typeof v.y === "number" ? v.y : NaN)
+           : Number(v);
+  if (!Number.isFinite(ms)) return "";
+  return ms>=100?ms.toFixed(0):ms>=10?ms.toFixed(1):ms>=1?ms.toFixed(2):ms.toFixed(3);
+};
+
+/* Inline Chart.js plugin: draw each bar's value just above the bar. Enabled
+ * per-chart via options.plugins.valueLabels.formatter; charts that don't set it
+ * are untouched (TLS/scatter stay clean). No external dependency, so it works
+ * even when only the Chart.js core CDN is reachable. */
+const valueLabels = {
+  id: "valueLabels",
+  afterDatasetsDraw(chart) {
+    const opt = (chart.options.plugins||{}).valueLabels;
+    if (!opt || !opt.formatter) return;
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.fillStyle = "#e6e8ee"; ctx.font = "10px sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+    chart.data.datasets.forEach((ds, di) => {
+      const meta = chart.getDatasetMeta(di);
+      if (meta.hidden) return;
+      meta.data.forEach((el, i) => {
+        const v = ds.data[i];
+        if (v == null) return;
+        ctx.fillText(opt.formatter(v, i), el.x, el.y - 3);
+      });
+    });
+    ctx.restore();
+  }
+};
+if (window.Chart) Chart.register(valueLabels);
 
 async function boot() {
   $("fileInput").addEventListener("change", onFile);
@@ -99,12 +138,12 @@ function render() {
   const kem = filt(MERGED.kem), sig = filt(MERGED.sig), tls = filt(MERGED.tls);
 
   barByLevel("kem_keygen", kem, "keygen", "KEM keygen — median latency (ms)");
-  barByLevel("kem_encaps", kem, "encaps", "KEM encaps — median latency (ms)");
-  barByLevel("kem_decaps", kem, "decaps", "KEM decaps — median latency (ms)");
+  barByLevel("kem_encaps", kem, "encaps", "KEM encaps — median latency (ms)", "derive");
+  barByLevel("kem_decaps", kem, "decaps", "KEM decaps — median latency (ms)", "derive");
   scatter("kem_scatter", kem, "encaps", "public_key", "KEM size vs speed (encaps)", "public key (B)");
-  barByLevel("sig_sign", sig, "sign", "Signature sign — median latency (ms)");
-  barByLevel("sig_verify", sig, "verify", "Signature verify — median latency (ms)");
-  scatter("sig_scatter", sig, "sign", "signature", "Signature size vs speed (sign)", "signature (B)");
+  barByLevel("sig_sign", sig, "sign", "Signature sign — median latency (ms)", "sign", true);
+  barByLevel("sig_verify", sig, "verify", "Signature verify — median latency (ms)", "verify", true);
+  scatter("sig_scatter", sig, "sign", "signature", "Signature size vs speed (sign)", "signature (B)", true);
   tlsThroughput("tls_hs", tls);
   tlsClientHello("tls_chello", tls);
 }
@@ -151,11 +190,14 @@ function baselineAnnotation(value, label) {
             backgroundColor:BASE_COLOR, font:{size:10} } } } };
 }
 
-function barByLevel(canvasId, rows, op, title) {
+function barByLevel(canvasId, rows, op, title, baselineOp = op, logY = false) {
   const data = rows.filter(r => r.operation === op)
                    .sort((a,b)=>(a.nist_level||0)-(b.nist_level||0) || a.median_ns-b.median_ns);
   if (!data.length) return drawEmpty(canvasId, title);
-  const base = data.find(r => r.classical);
+  /* Baseline reference line: the classical row for baselineOp (defaults to this
+   * chart's own op). KEM encaps/decaps have no classical encaps/decaps op, so
+   * they map to the X25519 key-agreement (derive) timing instead. */
+  const base = rows.find(r => r.classical && r.operation === baselineOp);
   const ctx = $(canvasId).getContext("2d");
   CHARTS.push(new Chart(ctx, {
     type:"bar",
@@ -166,15 +208,20 @@ function barByLevel(canvasId, rows, op, title) {
     options:{ responsive:true, plugins:{
         title:{display:true,text:title,color:"#e6e8ee"},
         legend:{display:false},
-        tooltip:{callbacks:{afterLabel:(it)=>{
+        valueLabels:{ formatter:(v)=>fmtMs(v) },
+        tooltip:{callbacks:{
+          label:(it)=>`median ${it.raw.toFixed(4)} ms (${Math.round(it.raw*1e6).toLocaleString()} ns)`,
+          afterLabel:(it)=>{
           const r=data[it.dataIndex]; return `NIST L${r.nist_level} · ${r.classical?"classical baseline":"PQ"}`; }}},
-        annotation: base ? baselineAnnotation(nsToMs(base.median_ns), `baseline ${base.alg}`) : {} },
+        annotation: base ? baselineAnnotation(nsToMs(base.median_ns),
+            baselineOp === op ? `baseline ${base.alg}` : `baseline ${base.alg} ${base.operation}`) : {} },
       scales:{ x:{ticks:{color:"#9aa3b2",maxRotation:50,minRotation:40}},
-               y:{title:{display:true,text:"ms",color:"#9aa3b2"},ticks:{color:"#9aa3b2"}} } }
+               y:{ type: logY?"logarithmic":"linear",
+                   title:{display:true,text:logY?"ms (log)":"ms",color:"#9aa3b2"},ticks:{color:"#9aa3b2"}} } }
   }));
 }
 
-function scatter(canvasId, rows, op, sizeKey, title, xlabel) {
+function scatter(canvasId, rows, op, sizeKey, title, xlabel, logScale = false) {
   const data = rows.filter(r => r.operation === op && r.sizes && r.sizes[sizeKey]);
   if (!data.length) return drawEmpty(canvasId, title);
   const pts = data.map(r => ({ x:r.sizes[sizeKey], y:nsToMs(r.median_ns), alg:r.alg, classical:r.classical }));
@@ -186,8 +233,10 @@ function scatter(canvasId, rows, op, sizeKey, title, xlabel) {
     options:{ responsive:true, plugins:{
         title:{display:true,text:title,color:"#e6e8ee"}, legend:{display:false},
         tooltip:{callbacks:{label:(it)=>`${it.raw.alg}: ${it.raw.x} B, ${it.raw.y.toFixed(3)} ms`}} },
-      scales:{ x:{title:{display:true,text:xlabel,color:"#9aa3b2"},ticks:{color:"#9aa3b2"}},
-               y:{title:{display:true,text:"median latency (ms)",color:"#9aa3b2"},ticks:{color:"#9aa3b2"}} } }
+      scales:{ x:{ type: logScale?"logarithmic":"linear",
+                   title:{display:true,text:logScale?`${xlabel} (log)`:xlabel,color:"#9aa3b2"},ticks:{color:"#9aa3b2"}},
+               y:{ type: logScale?"logarithmic":"linear",
+                   title:{display:true,text:logScale?"median latency (ms, log)":"median latency (ms)",color:"#9aa3b2"},ticks:{color:"#9aa3b2"}} } }
   }));
 }
 

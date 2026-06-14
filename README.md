@@ -219,14 +219,20 @@ The dashboard and `plot.py` default to baseline-grade runs only.
 - **KEM:** ML-KEM-512/768/1024; hybrids X25519MLKEM768, SecP256r1MLKEM768
   (hybrids are benchmarked in the TLS layer; at the primitive layer liboqs
   exposes them only as TLS groups, so they show as `enabled:false` there).
-  Baseline: **X25519**.
+  Code-based + conservative-LWE backups: Classic McEliece
+  348864/460896/460896f/6688128/6960119/8192128 (tiny ciphertext, slow keygen)
+  and FrodoKEM 640/976/1344-AES (unstructured LWE). Baseline: **X25519**.
 - **Signatures:** ML-DSA-44/65/87; SLH-DSA (SPHINCS+) variants;
   Falcon/FN-DSA-512/1024. Baseline: **Ed25519**.
 - **TLS:** matrix of configured KEM groups × signature algorithms, always
   including the classical **X25519 + Ed25519** pair.
 
-Add FrodoKEM / HQC / Classic McEliece etc. by uncommenting/adding entries — the
-harness skips anything your liboqs build doesn't enable (and says so).
+Classic McEliece and FrodoKEM are now measured (above). **HQC** is not — it is
+not enabled in the linked liboqs 0.15.0 build (disabled upstream after the
+IND-CCA2 implementation issue), so it is intentionally omitted rather than
+listed-and-disabled; re-add it once linked against a liboqs that re-enables it.
+Add further algorithms by uncommenting/adding entries — the harness skips
+anything your liboqs build doesn't enable (and says so).
 
 ---
 

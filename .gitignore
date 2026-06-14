@@ -20,6 +20,9 @@ results/*.json
 !results/example-*.json
 # Published baseline-grade RPi5 run (auto-calibrated full run)
 !results/rasberrypi5-20260608T223040Z.json
+# Baseline-grade RPi5 run adding the code-based + conservative-LWE KEMs
+# (Classic McEliece + FrodoKEM); kept as its own file, baseline above untouched.
+!results/rasberrypi5-20260614T205226Z.json
 
 # Merged dataset consumed by the dashboard. Tracked: ships the published RPi5
 # baseline so a fresh clone renders charts out-of-the-box. Contributors who

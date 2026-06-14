@@ -53,13 +53,44 @@ kem:
     - name: SecP256r1MLKEM768
       security_level: 3
       hybrid: true
-    # --- extend here, e.g. uncomment if your liboqs build enables them ---
-    # - name: FrodoKEM-640-AES
-    #   security_level: 1
-    # - name: HQC-128
-    #   security_level: 1
-    # - name: Classic-McEliece-348864
-    #   security_level: 1
+    # --- Code-based + conservative-LWE backup candidates (added 2026-06) -------
+    # Verified enabled in the linked liboqs 0.15.0 build via OQS_KEM_alg_is_enabled
+    # (oqsconfig.h + runtime cross-check). Keygen/encaps/decaps are reported as
+    # separate ops so the docs' "keygen is a one-time setup cost" argument can show
+    # the (slow) McEliece keygen explicitly next to its tiny ciphertext.
+    #
+    # Classic McEliece — code-based. Huge public key, TINY ciphertext, very slow
+    # keygen on the Pi (auto-calibration clamps keygen to min_samples=30, like
+    # SLH-DSA sign); encaps/decaps are fast and calibrate normally. Standard sets,
+    # plus the 460896f fast-keygen variant directly next to standard 460896: same
+    # params and same tiny ciphertext but a faster keygen, so the pair gives the
+    # keygen trade-off directly (the most useful McEliece data point for the
+    # migration doc). Other f-variants omitted as redundant.
+    - name: Classic-McEliece-348864
+      security_level: 1
+    - name: Classic-McEliece-460896
+      security_level: 3
+    - name: Classic-McEliece-460896f
+      security_level: 3
+    - name: Classic-McEliece-6688128
+      security_level: 5
+    - name: Classic-McEliece-6960119
+      security_level: 5
+    - name: Classic-McEliece-8192128
+      security_level: 5
+    # FrodoKEM — conservative (unstructured) LWE. ~100x slower encaps/decaps than
+    # ML-KEM and ~15x larger ciphertext. AES variant (uses ARM AES instructions,
+    # which this build compiles in); SHAKE variants also available if needed.
+    - name: FrodoKEM-640-AES
+      security_level: 1
+    - name: FrodoKEM-976-AES
+      security_level: 3
+    - name: FrodoKEM-1344-AES
+      security_level: 5
+    # HQC-128/192/256: NOT enabled in this liboqs 0.15.0 build (disabled upstream
+    # after the IND-CCA2 implementation issue; oqsconfig.h has it #undef and the
+    # runtime OQS_KEM_alg_is_enabled returns 0). Intentionally omitted rather than
+    # listed-and-disabled. Re-add once linked against a liboqs with HQC re-enabled.
 
 # ---- Signatures ------------------------------------------------------------
 sig:

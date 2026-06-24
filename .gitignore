@@ -23,6 +23,11 @@ results/*.json
 # Baseline-grade RPi5 run adding the code-based + conservative-LWE KEMs
 # (Classic McEliece + FrodoKEM); kept as its own file, baseline above untouched.
 !results/rasberrypi5-20260614T205226Z.json
+# Mac (Apple M3) cross-platform run: apple-m3-optimized from-source liboqs,
+# KEM/sig reps=5 (same auto-calibrate regime as the Pi). NOT baseline-grade
+# (unpinned, no governor) by design; provenance self-stamped in the JSON. Kept
+# as its own file for the tuned-vs-portable comparison; Pi baselines untouched.
+!results/mehmetmac-20260624T140033Z.json
 
 # Merged dataset consumed by the dashboard. Tracked: ships the published RPi5
 # baseline so a fresh clone renders charts out-of-the-box. Contributors who

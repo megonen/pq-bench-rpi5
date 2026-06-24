@@ -31,13 +31,27 @@ measurement:
   warmup_iters: 1000        # untimed iterations to settle caches/branch predictors
   timed_iters: 10000        # timed iterations per repetition
 
+# ---- security_level (NIST category) ----------------------------------------
+# Every candidate carries `security_level: N` — the NIST PQC category the
+# parameter set targets (1/2/3/5) — used only to group algorithms on the charts.
+# The mapping is PER-SCHEME, so different schemes reach the same security target
+# with different-looking sets: a level 1 sitting next to a level 2 is the real
+# NIST categorization, not a typo. Notably:
+#   - ML-KEM-512, Falcon-512, X25519         -> Category 1
+#   - ML-DSA-44                              -> Category 2  (FIPS 204 defines NO
+#                                               Category-1 ML-DSA; -44 is its
+#                                               smallest set and lands at Cat 2)
+#   - ML-KEM-768  / ML-DSA-65                -> Category 3
+#   - ML-KEM-1024 / ML-DSA-87 / Falcon-1024  -> Category 5
+# (NIST levels: 1 ~ AES-128, 2 ~ SHA-256 collision, 3 ~ AES-192, 5 ~ AES-256.)
+
 # ---- KEMs ------------------------------------------------------------------
 # baseline = the classical reference Logos uses TODAY (drawn on every chart).
 kem:
   baseline:
     - name: X25519
       classical: true
-      security_level: 1     # NIST category, for grouping on charts
+      security_level: 1     # NIST category (see "security_level" note above)
   candidates:
     - name: ML-KEM-512
       security_level: 1
@@ -100,7 +114,7 @@ sig:
       security_level: 1
   candidates:
     - name: ML-DSA-44
-      security_level: 2
+      security_level: 2     # Cat 2, not 1 — FIPS 204 has no Cat-1 ML-DSA (see note above)
     - name: ML-DSA-65
       security_level: 3
     - name: ML-DSA-87

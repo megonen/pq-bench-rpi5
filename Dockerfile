@@ -1,18 +1,19 @@
 # =============================================================================
-# Reproducible build of the full PQ benchmark toolchain on Debian aarch64
-# (the same OS family as Raspberry Pi OS / Ubuntu on the RPi5).
+# Reproducible BUILD of the PQ benchmark toolchain on Debian aarch64 (the same
+# OS family as Raspberry Pi OS / Ubuntu on the RPi5).
 #
-#   docker build -t pq-bench-rpi5 .
-#   # build/pin liboqs + openssl + oqs-provider inside the image:
-#   docker run --rm -v "$PWD/results:/app/results" pq-bench-rpi5 ./setup/setup.sh
+# This image is for BUILDING ONLY — it pins and compiles liboqs / OpenSSL /
+# oqs-provider reproducibly. It is NOT for running the benchmark.
 #
-# MEASUREMENT CAVEAT: a container cannot set the CPU governor or read the Pi's
-# SoC sensors (vcgencmd) unless you grant it. For *baseline-grade* numbers run
-# on the Pi natively, or grant the container what it needs, e.g.:
-#   docker run --rm --privileged --cpuset-cpus=3 \
-#     -v /usr/bin/vcgencmd:/usr/bin/vcgencmd -v /opt/vc:/opt/vc \
-#     -v "$PWD/results:/app/results" pq-bench-rpi5 ./run.sh
-# Otherwise the results JSON is correctly stamped is_baseline_grade=false.
+#   docker build -t pq-bench-rpi5 .          # build + pin the toolchain
+#
+# Run the MEASUREMENT bare-metal on the host, never in the container. A
+# container cannot reliably control the CPU governor, pin to an isolated core,
+# or read the Pi's SoC thermal/throttle sensors (vcgencmd) — the three knobs the
+# reference-grade gate depends on — so an in-container run could never be
+# baseline-grade and would only add noise. Build here if you like; then:
+#
+#   ./run.sh                                 # on the host (see README)
 # =============================================================================
 FROM debian:bookworm-slim
 
@@ -35,4 +36,6 @@ RUN python3 -m venv analyze/.venv \
     && analyze/.venv/bin/pip install --no-cache-dir -r analyze/requirements.txt
 
 ENTRYPOINT ["/bin/bash", "-lc"]
-CMD ["./run.sh --smoke"]
+# This image builds the toolchain; it does not run the benchmark. The default
+# command just says so — run the measurement bare-metal on the host (see README).
+CMD ["echo 'Toolchain built. Run the benchmark BARE-METAL on the host (./run.sh) — Docker is for reproducible builds only; a container cannot meet the baseline-grade gate.'"]

@@ -56,10 +56,17 @@ pq-bench-rpi5/
 ```bash
 git clone <this repo> && cd pq-bench-rpi5
 ./setup/setup.sh                 # build + pin liboqs, OpenSSL 3.5+, oqs-provider
-sudo ./run.sh                    # sudo needed to set the CPU governor
+sudo ./run.sh                    # sudo only to set the performance governor (see below)
 python3 analyze/merge.py results/*.json -o dashboard/data/merged.json
 # open dashboard/index.html (or deploy dashboard/ to GitHub Pages)
 ```
+
+**On `sudo`:** it is **optional, not a prerequisite.** The only thing it does is
+set the CPU governor to `performance` — none of the crypto needs root. `./run.sh`
+runs fine without it: it warns, skips the governor step, completes the run, and
+the results JSON is automatically stamped `is_baseline_grade=false` (governor
+demerit). So use `sudo` when you want a baseline-grade reference run; drop it for
+a quick local run you don't intend to submit.
 
 `./run.sh --smoke` runs tiny iteration counts as a fast pipeline check.
 `./run.sh --kemsig-only` / `--tls-only` scope the run. `--iters/--warmup/--reps`
@@ -73,19 +80,37 @@ brew install cmake openssl@3 git
 ./run.sh --smoke                 # produces valid JSON; stamped is_baseline_grade=false
 ```
 
-> **macOS runs are never baseline data.** No `performance` governor, no
-> `taskset` core pinning, and the build falls back to `-O3` (not
-> `-mcpu=cortex-a76`). Every results file records `is_baseline_grade=false`
-> with the exact reasons, and the dashboard hides such runs by default. macOS
-> `clock_gettime` is also only microsecond-resolution; the Pi's is nanosecond.
+> **macOS runs are cross-platform / smoke data, never baseline-grade — by
+> design, for three concrete reasons:**
+> 1. **Not a Raspberry Pi**, so it fails the gate's first condition outright.
+> 2. **No userspace cycle counter, and ~1 µs timer granularity.** macOS exposes
+>    no readable PMU cycle counter and its wall-clock quantizes to ~1 µs steps —
+>    a ~10% floor on the fastest ops (ML-KEM ~10 µs), negligible for anything
+>    ≥100 µs (McEliece, FrodoKEM). (See "Timing source" above.)
+> 3. **No Linux cpufreq governor, and core-pinning isn't guaranteed.** Two of the
+>    noise-control knobs the gate relies on — `performance` governor and a pinned
+>    core — aren't available, and the build flags aren't `cortex-a76` either.
+>
+> Every macOS results file records `is_baseline_grade=false` with the exact
+> reasons, and the dashboard hides such runs by default. They still produce
+> **useful cross-platform numbers** (the heavier McEliece/FrodoKEM ops are barely
+> affected by the timer floor) — they just can't meet the controlled reference
+> bar, hence smoke-only.
 
-### Docker (reproducible build)
+### Docker (reproducible build — build only, never run)
+
+Docker is for reproducibly **building** the pinned toolchain (liboqs / OpenSSL /
+oqs-provider), not for running the benchmark:
 
 ```bash
-docker build -t pq-bench-rpi5 .
-docker run --rm -v "$PWD/results:/app/results" pq-bench-rpi5 ./run.sh --smoke
+docker build -t pq-bench-rpi5 .   # builds + pins the toolchain inside the image
 ```
-See the `Dockerfile` header for granting governor/sensor access for real runs.
+
+**Run the measurement bare-metal on the host.** A container can't reliably set
+the CPU governor, pin to an isolated core, or read the Pi's thermal/throttle
+sensors — the noise-control knobs the reference-grade gate relies on — so an
+in-container run could never be baseline-grade and would only add jitter. Build
+in Docker if you like; then run `./run.sh` on the host.
 
 ---
 
@@ -93,11 +118,22 @@ See the `Dockerfile` header for granting governor/sensor access for real runs.
 
 `run.sh` is the wrapper that makes a number defensible:
 
-- **CPU governor → `performance`** (Linux). Recorded before/after; warns if it
-  couldn't be set (e.g. not root).
-- **Core pinning via `taskset -c 3`.** The Pi 5 has 4 cores (0–3); core 3 is
-  chosen to stay clear of CPU0, where the kernel tends to steer IRQs/RPS. The
-  pinned core and exact `taskset` command are recorded.
+- **CPU governor → `performance`** (Linux; needs `sudo`). Recorded before/after.
+  If it can't be set (e.g. not root) the run **continues anyway**: it warns,
+  proceeds, and the missing governor becomes an `is_baseline_grade=false`
+  demerit. `sudo` is only ever for this step — never for the crypto.
+- **Core pinning via `taskset -c 3`.** This is a **single-operation latency**
+  benchmark (one keygen, one encaps, one sign — timed in isolation), not a
+  parallel-throughput one, so pinning the whole sweep to one core keeps that
+  core's cache warm and removes cross-core migration scheduling noise, which
+  tightens the median and MAD. The Pi 5 has 4 cores (0–3); core **3** is chosen
+  because core 0 typically absorbs the most OS/IRQ/RPS work. The pinned core and
+  exact `taskset` command are recorded.
+  - *Planned (separate axis):* a multi-core **throughput/scaling** mode — run an
+    op across 1..N cores and report ops/sec plus scaling efficiency per
+    algorithm. Some schemes (SLH-DSA, and later STARK proving) parallelize far
+    better than others, so it's a worthwhile dimension — but kept **separate**
+    from these per-op latency numbers, not mixed into them.
 - **Thermal/clock trace.** A background sampler logs ARM clock
   (`vcgencmd measure_clock arm`) and SoC temperature (`vcgencmd measure_temp`)
   ~once a second for the whole run. The full trace is embedded in the results
@@ -107,10 +143,25 @@ See the `Dockerfile` header for granting governor/sensor access for real runs.
   wall-clock nanoseconds via `clock_gettime(CLOCK_MONOTONIC)`. We report
   **median, MAD, IQR, min, max, mean, stddev, ops/sec**, plus per-repetition
   medians — not just a mean.
-- **Cycles mode (optional).** The harness probes whether the userspace ARM PMU
-  cycle counter (`PMCCNTR_EL0`) is readable. By default on Linux it traps
-  (needs a kernel module like `enable_arm_pmu`); we then **fall back to
-  time-based and say so** in the JSON (`run.cycles_available=false` + reason).
+- **Timing source — two clocks, honestly recorded.** There are two ways to time
+  an op:
+  1. **Cycle-based** via the ARM hardware cycle counter (`PMCCNTR_EL0`) — the
+     most precise, but on Linux **userspace can't read it by default**: the
+     register traps unless a kernel module enables the userspace PMU (e.g.
+     `enable_arm_pmu`).
+  2. **Time-based** wall-clock via `clock_gettime(CLOCK_MONOTONIC)` — always
+     available, and accurate enough for the millisecond/microsecond ranges here.
+
+  The harness probes the cycle counter and, when it isn't available, **falls
+  back to wall-clock and records exactly that** in the JSON
+  (`run.cycles_available=false` + the reason). **On a stock machine the cycle
+  counter is not available, so runs use the wall-clock timer by default** — and
+  both published runs reflect this: the RPi5 baseline and the macOS run *both*
+  have `cycles_available=false` (both wall-clock). The remaining difference
+  between them is wall-clock **granularity**, not clock *type*: the Pi's
+  wall-clock lands on fractional microseconds, while macOS quantizes to ~1 µs
+  steps — a ~10% resolution floor on the fastest ops (ML-KEM keygen ~10 µs),
+  negligible for anything ≥100 µs (McEliece, FrodoKEM).
 - **CPU features / Keccak acceleration.** NEON, SHA2, SHA3, SHA512, AES, PMULL
   are detected (`/proc/cpuinfo` on Linux, `sysctl` on macOS). **Note:** the
   Cortex-A76 has the SHA2/AES extensions but **not** the ARMv8.2 SHA3
@@ -207,10 +258,24 @@ All `bench_pq.c` references are `bench/kem_sig/bench_pq.c`.
 
 ### `is_baseline_grade`
 
-The single gate that protects the dataset. It is `true` **only** when all hold:
-real Raspberry Pi · `performance` governor · core-pinned · `cortex-a76` build
-flags · no thermal throttling. Otherwise it is `false` with a list of reasons.
-The dashboard and `plot.py` default to baseline-grade runs only.
+A **reference-measurement quality gate**, not a deployment requirement. It marks
+whether a run was produced under controlled, reproducible *reference* conditions,
+so the numbers are comparable across algorithms and across machines. It is `true`
+**only** when all hold: real Raspberry Pi · `performance` governor · core-pinned ·
+`cortex-a76` build flags · no thermal throttling. Otherwise it is `false` with a
+list of reasons.
+
+- **What it is:** a label that says "this run is clean enough to sit in the
+  cross-algorithm / cross-machine reference comparison." The dashboard and
+  `plot.py` default to baseline-grade runs only, so noisy runs don't distort the
+  picture.
+- **What it is *not*:** a claim about how nodes must be configured in production.
+  Real deployments are heterogeneous (different SoCs, governors, thermals) —
+  that's a separate question this flag does not speak to.
+- A run that doesn't meet the gate **isn't wrong** — it's just flagged
+  `is_baseline_grade=false` with the reasons and kept out of the reference set.
+  The macOS cross-platform runs are exactly this: useful, honest numbers that
+  simply aren't reference-grade.
 
 ---
 
@@ -349,8 +414,9 @@ dashboard's run selector will then include your Pi alongside everyone else's.
 - **TLS handshakes are in-process over memory BIOs** — this isolates crypto
   cost cleanly (no socket/scheduler noise) but is not a network RTT model;
   ClientHello fragmentation is flagged against a typical 1400-byte MSS.
-- A run inside Docker is not baseline-grade unless you grant it governor + Pi
-  sensors (see `Dockerfile`).
+- **Docker is build-only.** The benchmark is not run in a container — a
+  container can't reliably control the governor, core pinning, or throttle
+  detection, so measurement runs bare-metal on the host (see the Docker section).
 
 ## Future phase (not implemented)
 

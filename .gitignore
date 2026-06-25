@@ -28,6 +28,9 @@ results/*.json
 # (unpinned, no governor) by design; provenance self-stamped in the JSON. Kept
 # as its own file for the tuned-vs-portable comparison; Pi baselines untouched.
 !results/mehmetmac-20260624T140033Z.json
+# Consolidated baseline-grade RPi5 run (KEM + sig + TLS in one pass); supersedes
+# the two older split files (0614 KEM/sig + 0608 TLS) as the single Pi baseline.
+!results/rasberrypi5-20260625T202356Z.json
 
 # Merged dataset consumed by the dashboard. Tracked: ships the published RPi5
 # baseline so a fresh clone renders charts out-of-the-box. Contributors who

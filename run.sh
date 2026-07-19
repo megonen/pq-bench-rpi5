@@ -86,6 +86,7 @@ WORK="$ROOT/results/.work-$HOST-$TS"
 mkdir -p "$WORK" "$ROOT/results"
 KEMSIG_OUT="$WORK/kemsig.jsonl"; : > "$KEMSIG_OUT"
 TLS_OUT="$WORK/tls.json"
+RUST_TLS_PROV=""   # set when the TLS layer runs (rustls provenance path)
 THERMAL="$WORK/thermal.csv"; : > "$THERMAL"
 META="$WORK/meta.env"
 FEATURES="$WORK/cpu_features.json"
@@ -209,6 +210,33 @@ if [ "$DO_KEMSIG" = 1 ]; then
     add_warn "cargo not installed — rustcrypto measurement group skipped"
     echo '{"available":false,"reason":"Rust toolchain (cargo) not installed on this host"}' > "$RUST_PROV"
   fi
+
+  # ---- aws-lc-rs primitive PRICING rows -----------------------------------
+  # The primitives the rustls-awslc TLS handshakes actually execute
+  # (implementation:"aws-lc-rs"). NOT an independent implementation — it
+  # wraps the AWS-LC C library — measured solely so the rustls handshake
+  # primitive sums are priced from the right code.
+  if command -v cargo >/dev/null 2>&1; then
+    pqb_log "building rustls harness for aws-lc-rs pricing rows"
+    if (cd "$ROOT/bench/rust-tls" && cargo build --release --locked) >"$WORK/rust_tls_build.log" 2>&1; then
+      RTBIN="$ROOT/bench/rust-tls/target/release/pqb-rust-tls"
+      pqb_log "running aws-lc-rs primitive sweep"
+      while IFS=$'\t' read -r kind alg; do
+        [ -z "$alg" ] && continue
+        pqb_log "  aws-lc-rs $kind $alg"
+        ERRF="$WORK/err.awslc.$kind.$alg.txt"
+        # shellcheck disable=SC2086
+        if $TASKSET "$RTBIN" --kind "$kind" --alg "$alg" \
+            "${BENCH_SIZE_ARGS[@]}" >> "$KEMSIG_OUT" 2>"$ERRF"; then
+          :
+        else
+          add_warn "aws-lc-rs pricing row failed for $kind $alg (see $ERRF)"
+        fi
+      done < <("$RTBIN" --list-primitives)
+    else
+      add_warn "rust-tls build failed (see $WORK/rust_tls_build.log) — aws-lc-rs pricing rows skipped"
+    fi
+  fi
 fi
 
 # ---- TLS layer -------------------------------------------------------------
@@ -218,7 +246,8 @@ if [ "$DO_TLS" = 1 ]; then
                   "$(python3 "$ROOT/bench/lib/list_algs.py" tls "$ROOT/config.yaml")")"
     [ "$SMOKE" = 1 ] && TLS_CONNS=50
     pqb_log "running TLS handshake matrix ($TLS_CONNS handshakes/cell)"
-    if PQB_TASKSET="$TASKSET" "$ROOT/bench/tls/run_tls.sh" \
+    RUST_TLS_PROV="$WORK/rust_tls_provenance.json"
+    if PQB_TASKSET="$TASKSET" PQB_RUSTLS_PROV="$RUST_TLS_PROV" "$ROOT/bench/tls/run_tls.sh" \
          --out "$TLS_OUT" --connections "$TLS_CONNS" >"$WORK/tls.log" 2>&1; then
       pqb_log "TLS layer done ($(grep -c '"label"' "$TLS_OUT" 2>/dev/null || echo 0) cells)"
     else
@@ -306,6 +335,7 @@ python3 "$ROOT/bench/lib/assemble.py" \
   --meta "$META" --lock "$LOCK" --features "$FEATURES" \
   --kemsig "$KEMSIG_OUT" ${TLS_OUT:+--tls "$TLS_OUT"} \
   ${RUST_PROV:+--rust-provenance "$RUST_PROV"} \
+  ${RUST_TLS_PROV:+--rust-tls-provenance "$RUST_TLS_PROV"} \
   --thermal "$THERMAL" --config "$ROOT/config.yaml" \
   --out "$OUT" >/dev/null
 

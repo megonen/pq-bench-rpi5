@@ -56,3 +56,6 @@ __pycache__/
 
 # Rust harness build tree (bench/rust — Cargo.lock IS committed)
 bench/rust/target/
+
+# rustls TLS harness build tree (bench/rust-tls — Cargo.lock IS committed)
+bench/rust-tls/target/

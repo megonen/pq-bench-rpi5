@@ -46,9 +46,13 @@ per operation** to your Pi's speed, so results stay comparable across machines.
 
   (Debian 13 also packages `rustup` — `sudo apt install rustup && rustup default
   stable` should be equivalent, but that path has not been verified by this
-  project.) **Optional:** if cargo is absent, `./run.sh` skips the rustcrypto
-  group gracefully and records the reason in the results JSON — the rest of the
-  benchmark is unaffected.
+  project.) The Rust toolchain now covers TWO measurement groups: the
+  `rustcrypto` primitives (`bench/rust`) and the `rustls-awslc` TLS matrix
+  (`bench/rust-tls`). The latter compiles the AWS-LC C library on first build
+  (several extra minutes on a Pi; needs `cmake`, which `setup.sh deps` already
+  installs — unverified on a Pi so far). **Optional:** if cargo is absent,
+  `./run.sh` skips both Rust groups gracefully and records the reasons in the
+  results JSON — the rest of the benchmark is unaffected.
 - **Internet access** and **sudo**.
 
 ## Step 1 — Clone (public repo, no auth)

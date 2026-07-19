@@ -62,9 +62,31 @@ field:
      here — native OpenSSL can issue SLH-DSA certificates but cannot negotiate
      SLH-DSA in TLS 1.3 (the IETF codepoints are still draft), so that row
      being provider-only is itself a finding.
-4. **rustls + aws-lc-rs TLS 1.3 handshakes** *(arriving in a later stage)*:
-   the Rust TLS stack as an independent protocol-layer implementation
-   (`implementation: rustls-awslc`).
+4. **rustls + aws-lc-rs TLS 1.3 handshakes** *(implemented — `bench/rust-tls`)*:
+   the Rust TLS stack (`implementation: rustls-awslc`), same phase structure
+   and same in-memory methodology (`pqb-rust-tls` mirrors `bench_tls.c`: same
+   clock, same fixed connections+warmup loop, same statistics and
+   bytes-on-wire/ClientHello accounting). Coverage — measured: X25519,
+   X25519MLKEM768, SecP256r1MLKEM768, pure MLKEM768/MLKEM1024, against
+   Ed25519 (baseline/phase0) and ML-DSA-44/65/87 (phase2, using the natively
+   generated certificates). Recorded as `enabled:false` rows, not hidden:
+   rustls 0.23 has **no MLKEM512** group, and **SLH-DSA is absent from
+   rustls/aws-lc-rs entirely** — so across both production stacks SLH-DSA in
+   TLS 1.3 exists only in the experimental oqs-provider. **Unstable-feature
+   caveat**: the ML-DSA rows ride `rustls-post-quantum/aws-lc-rs-unstable`
+   (aws-lc-rs's `unstable` ML-DSA API) and carry `unstable_features: true`
+   in the row itself. **Two-variables caveat**: rustls-vs-OpenSSL compares
+   two protocol implementations AND two crypto backends (aws-lc-rs vs
+   OpenSSL native) at once — the variables are not separable from these
+   numbers, and this is not a language comparison. Unlike `bench/rust`, this
+   group makes no pure-Rust claim (aws-lc-rs wraps the AWS-LC C library).
+   To price these handshakes' primitive sums correctly, the run also measures
+   **aws-lc-rs pricing rows** (`implementation: aws-lc-rs`: ML-KEM-768/1024,
+   ML-DSA-44/65/87, X25519, secp256r1, Ed25519, same bench_pq methodology) —
+   explicitly the primitives these handshakes execute, NOT an independent
+   implementation; Stage 3's exclusion of FFI wrappers from the pure-Rust
+   group stands. Sums are priced strictly per-stack: C-stack cells from
+   liboqs/openssl rows, rustls cells from aws-lc-rs rows, never across.
 
 | Layer | Metrics |
 |-------|---------|
@@ -381,7 +403,11 @@ list of reasons.
   exposes them only as TLS groups, so they show as `enabled:false` there).
   Code-based + conservative-LWE backups: Classic McEliece
   348864/460896/460896f/6688128/6960119/8192128 (tiny ciphertext, slow keygen)
-  and FrodoKEM 640/976/1344-AES (unstructured LWE). Baseline: **X25519**.
+  and FrodoKEM 640/976/1344 in **both AES and SHAKE variants** — same
+  algorithm and arithmetic, different symmetric primitive, added as the
+  controlled test of the hardware-AES attribution for FrodoKEM's
+  cross-platform behaviour (on the M3 the SHAKE variants measure ~5–6.6×
+  slower than AES). Baseline: **X25519**.
 - **Signatures:** ML-DSA-44/65/87; hash-based **both** SLH-DSA (FIPS 205 final,
   `SLH_DSA_PURE_SHA2_{128s,128f,192f,256f}`) **and** the round-3
   `SPHINCS+-SHA2-*-simple` sets; Falcon/FN-DSA-512/1024. Baseline: **Ed25519**.

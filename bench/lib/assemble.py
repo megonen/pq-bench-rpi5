@@ -232,11 +232,9 @@ def kem_group_components(group: str):
     if g == "x448mlkem1024":
         return [("x448", ECDH_OPS), ("mlkem1024", KEM_OPS)], []
     if g == "secp256r1mlkem768":
-        return [("mlkem768", KEM_OPS)], [
-            "secp256r1 (P-256) ECDH is not measured as a primitive in this run"]
+        return [("secp256r1", ECDH_OPS), ("mlkem768", KEM_OPS)], []
     if g == "secp384r1mlkem1024":
-        return [("mlkem1024", KEM_OPS)], [
-            "secp384r1 (P-384) ECDH is not measured as a primitive in this run"]
+        return [("secp384r1", ECDH_OPS), ("mlkem1024", KEM_OPS)], []
     return [], [f"no primitive mapping defined for TLS group '{group}'"]
 
 
@@ -289,6 +287,18 @@ def acceleration_for(row: dict, features: dict, opt_defines: str,
         return {"arithmetic": {"path": "openssl-internal",
                                "detail": "OpenSSL's own curve25519 code (assembly on major targets)"},
                 "symmetric": [],
+                "determined_by": SRC_INSP}
+
+    if impl == "aws-lc-rs":  # pricing rows for the rustls-awslc TLS group
+        return {"arithmetic": {
+                    "path": "aws-lc-native",
+                    "detail": "AWS-LC C/assembly via the aws-lc-rs FFI wrapper — "
+                              "measured to price rustls-awslc handshakes, NOT an "
+                              "independent implementation"},
+                "symmetric": [
+                    {"primitive": "internal", "source": "AWS-LC internal",
+                     "hw_instructions": None,
+                     "determined_by": "not separately characterised"}],
                 "determined_by": SRC_INSP}
 
     if impl == "rustcrypto":
@@ -392,19 +402,22 @@ def cross_check_sizes(kem_rows: list, sig_rows: list, warnings: list) -> None:
 def annotate_tls(tls: dict, kem_rows: list, sig_rows: list) -> None:
     """Stamp phase/implementation/sig_alg defaults and compute the
     handshake_primitive_sum block for every enabled matrix cell."""
-    # The TLS harness is the C/OpenSSL stack, so its primitive sums must be
-    # priced from the C-stack primitive rows (liboqs / openssl) — never from
-    # rustcrypto rows that happen to share an algorithm name.
-    PREFERRED = ("liboqs", "openssl")
-    idx = {}
+    # Sums must be priced from the primitives the handshake ACTUALLY executes:
+    # C-stack cells (openssl-native / oqs-provider) strictly from liboqs and
+    # openssl rows; rustls-awslc cells strictly from aws-lc-rs rows. A row
+    # from the wrong implementation (e.g. pure-Rust rustcrypto, ~2x slower
+    # than the asm paths) must NEVER price a cell, even when it is the only
+    # row with a matching algorithm name.
+    idx_c, idx_awslc = {}, {}
     for row in kem_rows + sig_rows:
         if not row.get("enabled"):
             continue
         key = (row.get("kind"), norm_alg(row.get("alg")))
-        cur = idx.get(key)
-        if cur is None or (cur.get("implementation") not in PREFERRED
-                           and row.get("implementation") in PREFERRED):
-            idx[key] = row
+        impl = row.get("implementation")
+        if impl in ("liboqs", "openssl"):
+            idx_c.setdefault(key, row)
+        elif impl == "aws-lc-rs":
+            idx_awslc.setdefault(key, row)
 
     def component_entries(kind, row, ops_spec, out, missing):
         for op, count, role in ops_spec:
@@ -435,19 +448,26 @@ def annotate_tls(tls: dict, kem_rows: list, sig_rows: list) -> None:
         if not cell.get("enabled"):
             continue
 
+        if cell.get("implementation") == "rustls-awslc":
+            idx, stack = idx_awslc, "aws-lc-rs"
+        else:
+            idx, stack = idx_c, "liboqs/openssl"
+
         comps_spec, missing = kem_group_components(cell.get("group"))
         components = []
         for alg_key, ops_spec in comps_spec:
             row = idx.get(("kem", alg_key))
             if row is None:
                 missing.append(
-                    f"KEM primitive matching '{alg_key}' not measured in this run")
+                    f"KEM primitive matching '{alg_key}' not measured from the "
+                    f"{stack} implementation in this run")
                 continue
             component_entries("kem", row, ops_spec, components, missing)
         srow = idx.get(("sig", norm_alg(sig_alg)))
         if srow is None:
             missing.append(
-                f"signature primitive matching '{sig_alg}' not measured in this run")
+                f"signature primitive matching '{sig_alg}' not measured from "
+                f"the {stack} implementation in this run")
         else:
             component_entries("sig", srow, SIG_OPS, components, missing)
 
@@ -474,6 +494,9 @@ def main():
                     help="JSON from pqb-rust --provenance (or an "
                          "available:false stub explaining why the rustcrypto "
                          "group did not run)")
+    ap.add_argument("--rust-tls-provenance", default="",
+                    help="JSON from pqb-rust-tls --provenance (the "
+                         "rustls-awslc TLS group)")
     ap.add_argument("--thermal", default="")
     ap.add_argument("--config", default="")
     ap.add_argument("--out", required=True)
@@ -488,6 +511,8 @@ def main():
 
     rust_toolchain = load_json(args.rust_provenance) or {
         "available": False, "reason": "rust harness not run"}
+    rust_tls_toolchain = load_json(args.rust_tls_provenance) or {
+        "available": False, "reason": "rustls harness not run"}
 
     for row in kemsig:
         if row.get("enabled"):
@@ -581,6 +606,7 @@ def main():
             "oqsprovider_ref": lock.get("OQSPROVIDER_REF", ""),
             "oqsprovider_commit": lock.get("OQSPROVIDER_COMMIT", ""),
             "rust": rust_toolchain,
+            "rust_tls": rust_tls_toolchain,
         },
         "thermal_trace": thermal,
         "warnings": warnings,

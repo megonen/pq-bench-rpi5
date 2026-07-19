@@ -69,10 +69,14 @@ gen_cert() {
   "$OSSL" req -x509 -new -newkey "$alg" -nodes $prov \
       -keyout "$ca_key" -out "$ca_crt" -days 3650 \
       -subj "/CN=PQB Test CA ($alg)" >/dev/null 2>&1 || return 1
-  # server key + CSR + cert signed by CA
+  # server key + CSR + cert signed by CA. SAN is REQUIRED by webpki (the
+  # rustls verifier rejects CN-only certs); OpenSSL doesn't mind, so the same
+  # certs serve every stack. -copy_extensions carries the SAN into the cert.
   "$OSSL" genpkey -algorithm "$alg" $prov -out "$sv_key" >/dev/null 2>&1 || return 1
-  "$OSSL" req -new -key "$sv_key" $prov -out "$sv_csr" -subj "/CN=localhost" >/dev/null 2>&1 || return 1
+  "$OSSL" req -new -key "$sv_key" $prov -out "$sv_csr" -subj "/CN=localhost" \
+      -addext "subjectAltName = DNS:localhost" >/dev/null 2>&1 || return 1
   "$OSSL" x509 -req -in "$sv_csr" -CA "$ca_crt" -CAkey "$ca_key" $prov \
+      -copy_extensions copyall \
       -out "$sv_crt" -days 3650 -CAcreateserial >/dev/null 2>&1 || return 1
   return 0
 }
@@ -202,6 +206,65 @@ if [ "$HAVE_OQS" = 1 ] && [ "${#SIG_OK_ALGS[@]}" -gt 0 ]; then
         || pqb_warn "cell $kem+$sig failed"
     done
   done < <(read_list kem_groups)
+fi
+
+# ---- rustls + aws-lc-rs matrix (implementation: rustls-awslc) ---------------
+# Same phase structure, same in-memory methodology (pqb-rust-tls mirrors
+# bench_tls.c). Reuses the SAME PEM certs: base_* for baseline/phase0 and the
+# NATIVE OpenSSL-generated ML-DSA certs for phase2 (webpki needs the SAN that
+# gen_cert now adds). Skipped gracefully without cargo.
+RUSTLS_BIN="$ROOT/bench/rust-tls/target/release/pqb-rust-tls"
+if command -v cargo >/dev/null 2>&1; then
+  pqb_log "building rustls harness (cargo build --release --locked)"
+  if (cd "$ROOT/bench/rust-tls" && cargo build --release --locked) >"$PKI/rustls_build.log" 2>&1; then
+    :
+  else
+    pqb_warn "rustls harness build failed (see $PKI/rustls_build.log) — rustls-awslc matrix skipped"
+    RUSTLS_BIN=""
+  fi
+else
+  pqb_warn "cargo not installed — rustls-awslc TLS matrix skipped"
+  RUSTLS_BIN=""
+fi
+if [ -n "$RUSTLS_BIN" ] && [ -x "$RUSTLS_BIN" ]; then
+  [ -n "${PQB_RUSTLS_PROV:-}" ] && "$RUSTLS_BIN" --provenance > "$PQB_RUSTLS_PROV"
+  read_rustls_list() { python3 -c "import json,sys; print('\n'.join(((json.loads(sys.argv[1]).get('rustls') or {}).get(sys.argv[2])) or []))" "$TLS_JSON" "$1"; }
+  RUSTLS_CLASSICAL="$(python3 -c "import json,sys;print((json.loads(sys.argv[1]).get('rustls') or {}).get('classical_sig',''))" "$TLS_JSON")"
+  run_rustls_cell() {  # <cert-prefix> <kem-group> <sig-alg>
+    local pfx="$1" kem="$2" sig="$3"
+    local label="${kem}+${sig}"
+    # shellcheck disable=SC2086
+    $TASKSET "$RUSTLS_BIN" --group "$kem" --ca "$PKI/${pfx}_ca.pem" \
+        --cert "$PKI/${pfx}_server.pem" --key "$PKI/${pfx}_server.key" \
+        --connections "$CONNS" --warmup "$WARMUP" --label "$label" \
+        --sig-alg "$sig" --phase "$(phase_for "$kem" "$sig")" 2>>"$PKI/bench_tls.err"
+  }
+  pqb_log "TLS rustls baseline: X25519 + $BASE_SIG"
+  run_rustls_cell "base_$BASE_SIG" X25519 "$BASE_SIG" >> "$ROWS" \
+    || pqb_warn "rustls baseline cell failed"
+  while IFS= read -r kem; do
+    [ -z "$kem" ] && continue
+    pqb_log "TLS rustls phase0: $kem + $RUSTLS_CLASSICAL"
+    run_rustls_cell "base_$RUSTLS_CLASSICAL" "$kem" "$RUSTLS_CLASSICAL" >> "$ROWS" \
+      || pqb_warn "rustls cell $kem+$RUSTLS_CLASSICAL failed"
+  done < <(read_rustls_list hybrid_groups; read_rustls_list pure_groups)
+  if [ "${#NATIVE_SIG_OK[@]}" -gt 0 ]; then
+    while IFS= read -r kem; do
+      [ -z "$kem" ] && continue
+      for sig in "${NATIVE_SIG_OK[@]}"; do
+        pqb_log "TLS rustls phase2: $kem + $sig"
+        run_rustls_cell "native_$sig" "$kem" "$sig" >> "$ROWS" \
+          || pqb_warn "rustls cell $kem+$sig failed"
+      done
+    done < <(echo X25519MLKEM768; read_rustls_list pure_groups)
+  else
+    pqb_warn "no native ML-DSA certs — rustls phase2 cells skipped"
+  fi
+  # SLH-DSA's absence from this stack is a FINDING, recorded in-data: across
+  # both production stacks (rustls/aws-lc-rs here, native OpenSSL above —
+  # draft TLS codepoints), SLH-DSA in TLS 1.3 exists only in the experimental
+  # oqs-provider.
+  printf '%s\n' '{"label":"X25519MLKEM768+SLH-DSA-SHA2-128f","group":"X25519MLKEM768","sig_alg":"SLH-DSA-SHA2-128f","phase":"phase2","implementation":"rustls-awslc","unstable_features":false,"enabled":false,"have_oqs_provider":false,"reason":"SLH-DSA is absent from rustls/aws-lc-rs entirely; native OpenSSL cannot negotiate it either (TLS codepoints still draft) - across both production stacks SLH-DSA in TLS exists only in the experimental oqs-provider"}' >> "$ROWS"
 fi
 
 # ---- assemble tls.json -----------------------------------------------------

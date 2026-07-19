@@ -165,6 +165,7 @@ def flatten(runs):
                 # v1 files predate these fields; defaults describe what those
                 # runs actually were (oqs-provider stack, phase by inference)
                 "implementation": cell.get("implementation") or "oqs-provider",
+                "unstable_features": cell.get("unstable_features", False),
                 "phase": cell.get("phase") or infer_phase(cell.get("group"), sig_alg),
                 "is_baseline_pair": label == (tls.get("baseline") or {}).get("label"),
                 "handshakes_per_sec": cell.get("handshakes_per_sec"),

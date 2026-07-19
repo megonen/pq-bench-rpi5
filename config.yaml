@@ -101,6 +101,19 @@ kem:
       security_level: 3
     - name: FrodoKEM-1344-AES
       security_level: 5
+    # FrodoKEM SHAKE variants — same algorithm and arithmetic as the AES rows,
+    # different symmetric primitive (SHAKE via the OQS SHA-3 layer instead of
+    # AES via OpenSSL EVP). Added as the controlled test of the companion
+    # document's claim that the M3's FrodoKEM lead comes from hardware AES:
+    # if the AES rows show a large cross-platform gap while these SHAKE rows
+    # sit near the portable-C norm, the AES attribution is isolated; if both
+    # move together, the cause is elsewhere.
+    - name: FrodoKEM-640-SHAKE
+      security_level: 1
+    - name: FrodoKEM-976-SHAKE
+      security_level: 3
+    - name: FrodoKEM-1344-SHAKE
+      security_level: 5
     # HQC-128/192/256: NOT enabled in this liboqs 0.15.0 build (disabled upstream
     # after the IND-CCA2 implementation issue; oqsconfig.h has it #undef and the
     # runtime OQS_KEM_alg_is_enabled returns 0). Intentionally omitted rather than
@@ -183,6 +196,27 @@ tls:
     classical_sig: ed25519  # phase0 rows (and the baseline cert)
     # phase2 = X25519MLKEM768 + pure_groups x pq_sigs. SecP256r1MLKEM768 is
     # phase0-only by design (Ed25519 is our classical signature; no ECDSA).
+    pq_sigs:
+      - ML-DSA-44
+      - ML-DSA-65
+      - ML-DSA-87
+
+  # ---- rustls + aws-lc-rs matrix (implementation: rustls-awslc) -----------
+  # The Rust TLS stack, same phase structure. Coverage facts (recorded as
+  # enabled:false rows, not hidden): rustls 0.23 has no MLKEM512 group, and
+  # SLH-DSA is absent from rustls/aws-lc-rs entirely — so across BOTH
+  # production stacks SLH-DSA in TLS exists only in the experimental
+  # oqs-provider. ML-DSA rows ride UNSTABLE cargo features
+  # (rustls-post-quantum/aws-lc-rs-unstable) and carry unstable_features:true.
+  rustls:
+    hybrid_groups:
+      - X25519MLKEM768
+      - SecP256r1MLKEM768
+    pure_groups:
+      - MLKEM512
+      - MLKEM768
+      - MLKEM1024
+    classical_sig: ed25519
     pq_sigs:
       - ML-DSA-44
       - ML-DSA-65

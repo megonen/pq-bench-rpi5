@@ -53,3 +53,6 @@ __pycache__/
 !results/mehmetmac-20260625T220618Z.json
 # Community RPi5 run cited by the companion document (file to be added).
 !results/thomas-pi-20260703T083302Z.json
+
+# Rust harness build tree (bench/rust — Cargo.lock IS committed)
+bench/rust/target/

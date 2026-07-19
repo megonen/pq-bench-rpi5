@@ -232,6 +232,31 @@ def kem_group_components(group: str):
     return [], [f"no primitive mapping defined for TLS group '{group}'"]
 
 
+def cross_check_sizes(kem_rows: list, sig_rows: list, warnings: list) -> None:
+    """When the same algorithm is measured by more than one implementation
+    (liboqs vs rustcrypto), their reported sizes MUST agree on every field
+    they both carry — a mismatch means a bug or a spec disagreement, not a
+    benchmarking result. Reported loudly: warnings array + stderr."""
+    for rows in (kem_rows, sig_rows):
+        by_alg = {}
+        for r in rows:
+            if r.get("enabled"):
+                by_alg.setdefault(norm_alg(r.get("alg")), []).append(r)
+        for group in by_alg.values():
+            base = group[0]
+            bs = base.get("sizes") or {}
+            for other in group[1:]:
+                os_ = other.get("sizes") or {}
+                for key in sorted(set(bs) & set(os_)):
+                    if bs[key] != os_[key]:
+                        msg = (f"SIZE MISMATCH for {base['alg']} .{key}: "
+                               f"{base.get('implementation')}={bs[key]} vs "
+                               f"{other.get('implementation')}={os_[key]} — "
+                               "bug or spec disagreement, NOT a benchmark result")
+                        warnings.append(msg)
+                        print(f"[assemble] {msg}", file=sys.stderr)
+
+
 def annotate_tls(tls: dict, kem_rows: list, sig_rows: list) -> None:
     """Stamp phase/implementation/sig_alg defaults and compute the
     handshake_primitive_sum block for every enabled matrix cell."""
@@ -304,6 +329,10 @@ def main():
     ap.add_argument("--features", default="")
     ap.add_argument("--kemsig", default="")
     ap.add_argument("--tls", default="")
+    ap.add_argument("--rust-provenance", default="",
+                    help="JSON from pqb-rust --provenance (or an "
+                         "available:false stub explaining why the rustcrypto "
+                         "group did not run)")
     ap.add_argument("--thermal", default="")
     ap.add_argument("--config", default="")
     ap.add_argument("--out", required=True)
@@ -315,6 +344,9 @@ def main():
     kemsig = [normalize_kemsig_row(r) for r in load_jsonl(args.kemsig)]
     tls = load_json(args.tls)
     thermal = parse_thermal(args.thermal)
+
+    rust_toolchain = load_json(args.rust_provenance) or {
+        "available": False, "reason": "rust harness not run"}
 
     for row in kemsig:
         if row.get("enabled"):
@@ -350,6 +382,7 @@ def main():
         warnings.extend([w for w in raw_warn.split("||") if w])
     if not is_baseline_grade:
         warnings.append("NOT RPi5-baseline-grade: " + "; ".join(baseline_reasons))
+    cross_check_sizes(kem_rows, sig_rows, warnings)
 
     result = {
         "schema_version": SCHEMA_VERSION,
@@ -404,6 +437,7 @@ def main():
             "openssl": lock.get("OPENSSL_COMMIT", ""),
             "oqsprovider_ref": lock.get("OQSPROVIDER_REF", ""),
             "oqsprovider_commit": lock.get("OQSPROVIDER_COMMIT", ""),
+            "rust": rust_toolchain,
         },
         "thermal_trace": thermal,
         "warnings": warnings,

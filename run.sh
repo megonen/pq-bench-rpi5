@@ -171,6 +171,46 @@ if [ "$DO_KEMSIG" = 1 ]; then
   done < <(python3 "$ROOT/bench/lib/list_algs.py" kemsig "$ROOT/config.yaml")
 fi
 
+# ---- Rust (RustCrypto) KEM/sig sweep ---------------------------------------
+# Second, independent measurement group: pure-Rust implementations, same
+# methodology (pqb-rust replicates bench_pq.c's calibration/stats), same
+# kemsig.jsonl, rows tagged implementation:"rustcrypto". If the Rust toolchain
+# is absent the group is SKIPPED and the reason recorded — never faked.
+RUST_PROV="$WORK/rust_provenance.json"
+if [ "$DO_KEMSIG" = 1 ]; then
+  if command -v cargo >/dev/null 2>&1; then
+    # Flag parity with the C side: mirror -mcpu=cortex-a76 when that is what
+    # the C harness was built with (recorded either way in the provenance).
+    if [ "${CFLAGS_TARGET:-}" = "cortex-a76" ]; then
+      export RUSTFLAGS="-C target-cpu=cortex-a76"
+    fi
+    pqb_log "building Rust harness (cargo build --release --locked)"
+    if (cd "$ROOT/bench/rust" && cargo build --release --locked) >"$WORK/rust_build.log" 2>&1; then
+      RBIN="$ROOT/bench/rust/target/release/pqb-rust"
+      "$RBIN" --provenance > "$RUST_PROV"
+      pqb_log "running RustCrypto KEM/sig sweep"
+      while IFS=$'\t' read -r kind alg; do
+        [ -z "$alg" ] && continue
+        pqb_log "  rust $kind $alg"
+        ERRF="$WORK/err.rust.$kind.$alg.txt"
+        # shellcheck disable=SC2086
+        if $TASKSET "$RBIN" --kind "$kind" --alg "$alg" \
+            "${BENCH_SIZE_ARGS[@]}" >> "$KEMSIG_OUT" 2>"$ERRF"; then
+          :
+        else
+          add_warn "rust harness failed for $kind $alg (see $ERRF)"
+        fi
+      done < <("$RBIN" --list)
+    else
+      add_warn "rust harness build failed (see $WORK/rust_build.log) — rustcrypto group skipped"
+      echo '{"available":false,"reason":"cargo build failed (see rust_build.log in the run work dir)"}' > "$RUST_PROV"
+    fi
+  else
+    add_warn "cargo not installed — rustcrypto measurement group skipped"
+    echo '{"available":false,"reason":"Rust toolchain (cargo) not installed on this host"}' > "$RUST_PROV"
+  fi
+fi
+
 # ---- TLS layer -------------------------------------------------------------
 if [ "$DO_TLS" = 1 ]; then
   if [ -x "$ROOT/bench/tls/run_tls.sh" ]; then
@@ -265,6 +305,7 @@ OUT="$ROOT/results/${HOST}-${TS}.json"
 python3 "$ROOT/bench/lib/assemble.py" \
   --meta "$META" --lock "$LOCK" --features "$FEATURES" \
   --kemsig "$KEMSIG_OUT" ${TLS_OUT:+--tls "$TLS_OUT"} \
+  ${RUST_PROV:+--rust-provenance "$RUST_PROV"} \
   --thermal "$THERMAL" --config "$ROOT/config.yaml" \
   --out "$OUT" >/dev/null
 

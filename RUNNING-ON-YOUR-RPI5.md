@@ -26,9 +26,21 @@ per operation** to your Pi's speed, so results stay comparable across machines.
 
   If your OS ships an older OpenSSL, `./setup/setup.sh` falls back to building
   the pinned `openssl-3.5.7` from source automatically (adds ~15–30 min).
-- **Rust toolchain — not needed yet.** A later stage adds a Rust harness
-  (RustCrypto primitives + rustls TLS); when it lands, this guide will gain a
-  `rustup` install step. Nothing to do today.
+- **Rust toolchain** — needed for the `rustcrypto` measurement group (pure-Rust
+  ML-KEM/ML-DSA/SLH-DSA plus X25519/Ed25519 anchors). Install stable Rust via
+  rustup:
+
+  ```sh
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  . "$HOME/.cargo/env"
+  cargo --version    # any recent stable is fine
+  ```
+
+  (Debian 13 also packages `rustup` — `sudo apt install rustup && rustup default
+  stable` should be equivalent, but that path has not been verified by this
+  project.) **Optional:** if cargo is absent, `./run.sh` skips the rustcrypto
+  group gracefully and records the reason in the results JSON — the rest of the
+  benchmark is unaffected.
 - **Internet access** and **sudo**.
 
 ## Step 1 — Clone (public repo, no auth)
@@ -54,13 +66,15 @@ sudo ./run.sh
 ```
 
 `sudo` is needed to set the performance governor, pin cores, and read the
-temperature. A full run currently takes **roughly 25–30 min on a Pi 5**: the
-last published consolidated run recorded 1351 s (~22.5 min), and the candidate
-list has since gained the four FIPS 205 SLH-DSA rows next to the four SPHINCS+
-rows — hash-based signing dominates, so expect a few extra minutes (estimate,
-not yet measured on a Pi). There are no iteration counts to set. Expect further
-growth once the later stages add the RustCrypto, OpenSSL-native-TLS and rustls
-measurement groups — this guide will state a measured figure when those land.
+temperature. A full run now takes **roughly 30–40 min on a Pi 5** (estimate,
+not yet measured on a Pi): the last published consolidated run recorded 1351 s
+(~22.5 min); since then the candidate list gained the four FIPS 205 SLH-DSA
+rows next to the four SPHINCS+ rows, and the run gained the whole `rustcrypto`
+measurement group (12 more algorithm sweeps at the same per-op calibration
+budget, plus a one-time `cargo build --release` of a few minutes on the first
+run). Hash-based signing dominates either way. There are no iteration counts
+to set. The OpenSSL-native-TLS and rustls groups land in later stages — this
+guide will state a measured figure when they do.
 
 Output lands in `results/<hostname>-<timestamp>.json`, stamped with full
 provenance (Pi model, RAM, kernel, governor, thermal trace, library versions)
@@ -105,11 +119,17 @@ hybrid handshakes grow past it and fragment.
   FIPS 205 SLH-DSA sets (`SLH_DSA_PURE_SHA2_*`, new rows) **and** the round-3
   `SPHINCS+-SHA2-*-simple` sets (the rows comparable to the earlier published
   baselines). They are different algorithms — compare like with like.
-- Currently measures **liboqs** (C / assembly) implementations plus the
-  oqs-provider TLS matrix; the pure-Rust second source (RustCrypto, rustls) and
-  the OpenSSL-native TLS path are separate measurement groups arriving in later
-  stages — the results schema already carries the `implementation` and `phase`
-  fields for them.
+- Measures **liboqs** (C / assembly) implementations, the **RustCrypto
+  pure-Rust second source** (`implementation: rustcrypto` rows — same
+  methodology, hedged signing like liboqs; Falcon/McEliece/FrodoKEM have no
+  mature pure-Rust implementation and stay absent there), and the oqs-provider
+  TLS matrix. The OpenSSL-native and rustls TLS paths are separate measurement
+  groups arriving in later stages — the results schema already carries the
+  `implementation` and `phase` fields for them.
+- Rust-vs-C gaps are partly **optimisation-path artefacts**, not pure
+  implementation quality: liboqs has hand-written aarch64 assembly for ML-KEM,
+  the Rust crates are portable Rust. The results JSON records both sides'
+  compiled code paths (`toolchain.liboqs_opt_defines` / `toolchain.rust`).
 - Userspace PMU cycle counts are usually unavailable, so the primary metric is
   **wall-clock time + ops/sec**.
 - SNARK / STARK benchmarking is **out of scope** for this phase (`config.yaml`

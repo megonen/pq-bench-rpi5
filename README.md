@@ -24,12 +24,24 @@ field:
 1. **liboqs — KEM + signatures** *(implemented)*: ML-KEM, Classic McEliece,
    FrodoKEM, ML-DSA, Falcon, SLH-DSA, plus the classical X25519/Ed25519
    baselines via OpenSSL EVP (`implementation: liboqs` / `openssl`).
-2. **RustCrypto — KEM + signatures** *(arriving in a later stage)*: the
-   pure-Rust `ml-kem` / `ml-dsa` / `slh-dsa` crates as an independent second
-   source (`implementation: rustcrypto`). Only these three families have mature
-   pure-Rust implementations — Falcon, Classic McEliece and FrodoKEM cells stay
-   genuinely absent rather than being filled by an FFI wrapper, which would not
-   be an independent source.
+2. **RustCrypto — KEM + signatures** *(implemented — `bench/rust`)*: pure-Rust
+   implementations as an independent second source
+   (`implementation: rustcrypto`), measured by a Rust harness (`pqb-rust`)
+   that deliberately replicates `bench_pq.c`'s clock
+   (`clock_gettime(CLOCK_MONOTONIC)` via libc), auto-calibration, and
+   median/MAD statistics so the two groups are methodologically comparable.
+   Crates (pinned exactly; `Cargo.lock` committed; all pre-1.0 and
+   **unaudited** — fine for benchmarking): `ml-kem 0.3.2`, `ml-dsa 0.1.1`,
+   `slh-dsa 0.2.0-rc.5`, plus `x25519-dalek 3.0.0` / `ed25519-dalek 3.0.0`
+   for the in-family classical anchors. Signing is **hedged**, matching
+   liboqs. Coverage: ML-KEM 512/768/1024, ML-DSA 44/65/87, SLH-DSA SHA2
+   128f/128s/192f/256f, X25519, Ed25519. **Not covered** — Falcon, Classic
+   McEliece and FrodoKEM have no mature pure-Rust implementation; those cells
+   stay genuinely absent rather than being filled by an FFI wrapper (pqcrypto,
+   liboqs-rust, aws-lc-rs), which would not be an independent source. The
+   dependency tree is verified free of liboqs/PQClean/C-FFI. Requires
+   cargo/rustc; if absent the group is skipped and the reason recorded in the
+   results.
 3. **TLS 1.3 handshakes by migration phase** *(oqs-provider matrix implemented;
    OpenSSL-native path arriving in a later stage)*:
    `implementation: oqs-provider` today, `openssl-native` next.
@@ -355,6 +367,12 @@ list of reasons.
   > they were the same scheme. The SLH-DSA identifiers exist in our pinned
   > liboqs 0.15.0 build, so this needs no library upgrade; liboqs 0.16.0
   > removes SPHINCS+ entirely, at which point the SPHINCS+ rows retire.
+- **RustCrypto second source:** the same ML-KEM / ML-DSA / SLH-DSA parameter
+  sets (and X25519/Ed25519 anchors) measured again from pure-Rust
+  implementations — rows join by `(kind, alg)` across `implementation`, and
+  `assemble.py` cross-checks that both implementations report identical
+  encoded sizes (a mismatch is reported loudly as a bug/spec disagreement,
+  never as a benchmark result).
 - **TLS:** matrix of configured KEM groups × signature algorithms, always
   including the classical **X25519 + Ed25519** pair.
 

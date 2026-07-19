@@ -11,10 +11,16 @@
  *
  *   bench_tls --group X25519MLKEM768 --ca ca.pem \
  *             --cert server.pem --key server.key --connections 1000 \
- *             --label "X25519MLKEM768+mldsa65"
+ *             --label "X25519MLKEM768+mldsa65" \
+ *             --sig-alg mldsa65 --phase phase2 --implementation oqs-provider
  *
- * Emits one JSON object. PQ groups/sigs require oqs-provider to be loadable
- * (point OPENSSL_MODULES at its directory); if it cannot load, we say so.
+ * Emits one JSON object. The caller (run_tls.sh) supplies the row's schema
+ * annotations verbatim: `phase` (baseline | phase0 | phase2 — the migration
+ * framework), `implementation` (which TLS stack produced the number), and
+ * `sig_alg` (the certificate signature algorithm, separate from the label so
+ * downstream code never has to parse labels). PQ groups/sigs require
+ * oqs-provider to be loadable (point OPENSSL_MODULES at its directory); if it
+ * cannot load, we say so.
  * ===========================================================================*/
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -96,6 +102,7 @@ static int one_handshake(SSL_CTX *cctx, SSL_CTX *sctx,
 
 int main(int argc, char **argv) {
     const char *group = "X25519", *ca = NULL, *cert = NULL, *key = NULL, *label = "";
+    const char *phase = "", *implementation = "oqs-provider", *sig_alg = "";
     uint64_t connections = 1000, warmup = 20;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--group") && i+1<argc) group = argv[++i];
@@ -105,6 +112,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--connections") && i+1<argc) connections = strtoull(argv[++i],0,10);
         else if (!strcmp(argv[i], "--warmup") && i+1<argc) warmup = strtoull(argv[++i],0,10);
         else if (!strcmp(argv[i], "--label") && i+1<argc) label = argv[++i];
+        else if (!strcmp(argv[i], "--phase") && i+1<argc) phase = argv[++i];
+        else if (!strcmp(argv[i], "--implementation") && i+1<argc) implementation = argv[++i];
+        else if (!strcmp(argv[i], "--sig-alg") && i+1<argc) sig_alg = argv[++i];
         else { fprintf(stderr,"bad arg %s\n",argv[i]); return 2; }
     }
     if (!cert || !key) { fprintf(stderr,"--cert and --key required\n"); return 2; }
@@ -137,9 +147,10 @@ int main(int argc, char **argv) {
     }
 
     if (!group_ok || !cert_ok || !verify_setup) {
-        printf("{\"label\":\"%s\",\"group\":\"%s\",\"enabled\":false,\"have_oqs_provider\":%s,"
+        printf("{\"label\":\"%s\",\"group\":\"%s\",\"sig_alg\":\"%s\",\"phase\":\"%s\","
+               "\"implementation\":\"%s\",\"enabled\":false,\"have_oqs_provider\":%s,"
                "\"reason\":\"%s%s%s\"}\n",
-               label, group, have_oqs?"true":"false",
+               label, group, sig_alg, phase, implementation, have_oqs?"true":"false",
                group_ok?"":"group-not-supported ",
                cert_ok?"":"cert-load-failed ",
                verify_setup?"":"ca-load-failed");
@@ -151,9 +162,10 @@ int main(int argc, char **argv) {
     size_t c2s, s2c, ch;
     for (uint64_t i = 0; i < warmup; i++) {
         if (one_handshake(cctx, sctx, &c2s, &s2c, &ch) != 0) {
-            printf("{\"label\":\"%s\",\"group\":\"%s\",\"enabled\":false,"
+            printf("{\"label\":\"%s\",\"group\":\"%s\",\"sig_alg\":\"%s\",\"phase\":\"%s\","
+                   "\"implementation\":\"%s\",\"enabled\":false,"
                    "\"have_oqs_provider\":%s,\"reason\":\"handshake failed\"}\n",
-                   label, group, have_oqs?"true":"false");
+                   label, group, sig_alg, phase, implementation, have_oqs?"true":"false");
             ERR_print_errors_fp(stderr);
             return 0;
         }
@@ -179,8 +191,9 @@ int main(int argc, char **argv) {
     double stddev = ok>1?sqrt(ss/(ok-1)):0;
     double hs_per_sec = median>0 ? 1e9/median : 0;
 
-    printf("{\"label\":\"%s\",\"group\":\"%s\",\"enabled\":true,\"have_oqs_provider\":%s,",
-           label, group, have_oqs?"true":"false");
+    printf("{\"label\":\"%s\",\"group\":\"%s\",\"sig_alg\":\"%s\",\"phase\":\"%s\","
+           "\"implementation\":\"%s\",\"enabled\":true,\"have_oqs_provider\":%s,",
+           label, group, sig_alg, phase, implementation, have_oqs?"true":"false");
     printf("\"connections\":%llu,\"succeeded\":%llu,", (unsigned long long)connections,(unsigned long long)ok);
     printf("\"handshake_latency_ns\":{\"median\":%.1f,\"p95\":%.1f,\"min\":%.1f,\"max\":%.1f,\"mean\":%.1f,\"stddev\":%.1f},",
            median,p95,mn,mx,mean,stddev);

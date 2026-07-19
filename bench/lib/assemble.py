@@ -23,7 +23,18 @@ import os
 import statistics
 import sys
 
-SCHEMA_VERSION = "1.0.0"
+# 2.0.0: per-row `backend` renamed to `implementation` (which library produced
+# the measurement — vocabulary: liboqs, openssl, rustcrypto, oqs-provider,
+# openssl-native, rustls-awslc); KEM/sig rows gained a `total` aggregate; TLS
+# matrix cells gained `phase` / `implementation` / `sig_alg` and a
+# `handshake_primitive_sum` block relating handshake latency to the primitive
+# operations it performs.
+SCHEMA_VERSION = "2.0.0"
+
+# Shared honesty note for every aggregate we compute from per-op medians.
+DERIVED_NOTE = ("sum of per-operation medians; a derived figure "
+                "(a sum of medians is not the median of a sum), "
+                "not a measured latency")
 
 
 def parse_envfile(path: str) -> dict:
@@ -128,6 +139,164 @@ def to_int(s, default=None):
         return default
 
 
+# ---- schema v2 helpers ------------------------------------------------------
+
+def normalize_kemsig_row(row: dict) -> dict:
+    """v1 compat: rows emitted by pre-2.0 harness builds carry `backend`; the
+    field is now `implementation` (same meaning). Lets assemble re-run on old
+    work dirs without rewriting them."""
+    if "implementation" not in row and "backend" in row:
+        row["implementation"] = row.pop("backend")
+    return row
+
+
+def add_row_total(row: dict) -> None:
+    """Aggregate one row's full operation cycle (KEM: keygen+encaps+decaps;
+    sig: keygen+sign+verify; the X25519 KEM-analog: keygen+derive)."""
+    ops = row.get("operations") or {}
+    medians = {op: (st or {}).get("median") for op, st in ops.items()}
+    if not medians or any(v is None for v in medians.values()):
+        return
+    row["total"] = {
+        "sum_of_medians_ns": round(sum(medians.values()), 2),
+        "operations": list(medians.keys()),
+        "note": DERIVED_NOTE,
+    }
+
+
+def norm_alg(name: str) -> str:
+    """Case/punctuation-insensitive algorithm key: 'ML-DSA-44' -> 'mldsa44',
+    'SPHINCS+-SHA2-128f-simple' -> 'sphincssha2128fsimple' (the oqs-provider
+    spelling), so TLS names and primitive names meet without a lookup table."""
+    return "".join(ch for ch in (name or "").lower() if ch.isalnum())
+
+
+PQ_KEM_TOKENS = ("mlkem", "kyber", "frodo", "hqc", "bike", "ntru", "mceliece")
+CLASSICAL_SIG_PREFIXES = ("ed25519", "ed448", "ecdsa", "rsa")
+
+
+def infer_phase(group: str, sig_alg: str) -> str:
+    """Migration-framework phase of a TLS cell (fallback for rows produced
+    before the harness emitted `phase` itself; keep in sync with
+    bench/tls/run_tls.sh phase_for())."""
+    g, s = (group or "").lower(), (sig_alg or "").lower()
+    pq_kem = any(t in g for t in PQ_KEM_TOKENS)
+    classical_sig = s.startswith(CLASSICAL_SIG_PREFIXES)
+    if classical_sig:
+        return "phase0" if pq_kem else "baseline"
+    return "phase2"
+
+
+# Primitive operations one TLS 1.3 handshake performs, per component.
+# KEM framing: client generates the keyshare (keygen), server encapsulates,
+# client decapsulates. ECDH framing (X25519 rows measure keygen+derive): both
+# sides generate a keyshare and both sides derive, hence count 2 + 2.
+KEM_OPS = (("keygen", 1, "client KEM keyshare generation"),
+           ("encaps", 1, "server encapsulation"),
+           ("decaps", 1, "client decapsulation"))
+ECDH_OPS = (("keygen", 2, "client + server ECDH keyshare generation"),
+            ("derive", 2, "shared-secret derivation on both sides"))
+SIG_OPS = (("sign", 1, "server CertificateVerify signature"),
+           ("verify", 2, "client verifies CertificateVerify + the CA signature "
+                         "over the server certificate"))
+
+HANDSHAKE_SUM_NOTE = (
+    "sum over the primitive operations one TLS 1.3 handshake performs with "
+    "this configuration, priced at the per-operation medians from this run's "
+    "KEM/sig sweep. Derived, not measured (" + DERIVED_NOTE + "); excludes "
+    "KDF/record-layer/X.509-parsing and all protocol overhead — the gap to "
+    "handshake_latency_ns.median is exactly that overhead. verify count 2 "
+    "assumes the client checks the CertificateVerify and the CA signature on "
+    "the leaf certificate (OpenSSL does not verify the trust anchor's "
+    "self-signature by default).")
+
+
+def kem_group_components(group: str):
+    """Map a TLS group to its measured KEM-side components.
+    Returns ([(normalized_alg, ops_spec), ...], [missing_descriptions])."""
+    g = norm_alg(group)
+    if g == "x25519":
+        return [("x25519", ECDH_OPS)], []
+    if g in ("mlkem512", "mlkem768", "mlkem1024"):
+        return [(g, KEM_OPS)], []
+    if g == "x25519mlkem768":
+        return [("x25519", ECDH_OPS), ("mlkem768", KEM_OPS)], []
+    if g == "x448mlkem1024":
+        return [("x448", ECDH_OPS), ("mlkem1024", KEM_OPS)], []
+    if g == "secp256r1mlkem768":
+        return [("mlkem768", KEM_OPS)], [
+            "secp256r1 (P-256) ECDH is not measured as a primitive in this run"]
+    if g == "secp384r1mlkem1024":
+        return [("mlkem1024", KEM_OPS)], [
+            "secp384r1 (P-384) ECDH is not measured as a primitive in this run"]
+    return [], [f"no primitive mapping defined for TLS group '{group}'"]
+
+
+def annotate_tls(tls: dict, kem_rows: list, sig_rows: list) -> None:
+    """Stamp phase/implementation/sig_alg defaults and compute the
+    handshake_primitive_sum block for every enabled matrix cell."""
+    idx = {}
+    for row in kem_rows + sig_rows:
+        if row.get("enabled"):
+            idx[(row.get("kind"), norm_alg(row.get("alg")))] = row
+
+    def component_entries(kind, row, ops_spec, out, missing):
+        for op, count, role in ops_spec:
+            st = (row.get("operations") or {}).get(op) or {}
+            med = st.get("median")
+            if med is None:
+                missing.append(
+                    f"operation '{op}' not measured for {kind} primitive "
+                    f"'{row.get('alg')}'")
+                continue
+            out.append({
+                "kind": kind, "alg": row.get("alg"),
+                "implementation": row.get("implementation"),
+                "operation": op, "count": count,
+                "median_ns_each": med,
+                "subtotal_ns": round(count * med, 2),
+                "role": role,
+            })
+
+    for cell in (tls.get("matrix") or []):
+        label = cell.get("label") or ""
+        sig_alg = cell.get("sig_alg") or \
+            (label.split("+", 1)[1] if "+" in label else "")
+        cell["sig_alg"] = sig_alg
+        cell.setdefault("implementation", "oqs-provider")
+        if not cell.get("phase"):
+            cell["phase"] = infer_phase(cell.get("group"), sig_alg)
+        if not cell.get("enabled"):
+            continue
+
+        comps_spec, missing = kem_group_components(cell.get("group"))
+        components = []
+        for alg_key, ops_spec in comps_spec:
+            row = idx.get(("kem", alg_key))
+            if row is None:
+                missing.append(
+                    f"KEM primitive matching '{alg_key}' not measured in this run")
+                continue
+            component_entries("kem", row, ops_spec, components, missing)
+        srow = idx.get(("sig", norm_alg(sig_alg)))
+        if srow is None:
+            missing.append(
+                f"signature primitive matching '{sig_alg}' not measured in this run")
+        else:
+            component_entries("sig", srow, SIG_OPS, components, missing)
+
+        complete = not missing
+        cell["handshake_primitive_sum"] = {
+            "sum_of_medians_ns":
+                round(sum(c["subtotal_ns"] for c in components), 1)
+                if complete else None,
+            "complete": complete,
+            "components": components,
+            "missing": missing,
+            "note": HANDSHAKE_SUM_NOTE,
+        }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--meta", required=True)
@@ -143,9 +312,17 @@ def main():
     meta = parse_envfile(args.meta)
     lock = parse_envfile(args.lock)
     features = load_json(args.features) or {}
-    kemsig = load_jsonl(args.kemsig)
+    kemsig = [normalize_kemsig_row(r) for r in load_jsonl(args.kemsig)]
     tls = load_json(args.tls)
     thermal = parse_thermal(args.thermal)
+
+    for row in kemsig:
+        if row.get("enabled"):
+            add_row_total(row)
+    kem_rows = [r for r in kemsig if r.get("kind") == "kem"]
+    sig_rows = [r for r in kemsig if r.get("kind") == "sig"]
+    if isinstance(tls, dict):
+        annotate_tls(tls, kem_rows, sig_rows)
 
     is_rpi = meta.get("IS_RPI") == "1"
     governor = meta.get("GOVERNOR_AFTER") or meta.get("GOVERNOR_BEFORE") or "unknown"
@@ -230,8 +407,8 @@ def main():
         },
         "thermal_trace": thermal,
         "warnings": warnings,
-        "kem": [r for r in kemsig if r.get("kind") == "kem"],
-        "sig": [r for r in kemsig if r.get("kind") == "sig"],
+        "kem": kem_rows,
+        "sig": sig_rows,
         "tls": tls,
     }
 

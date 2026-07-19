@@ -6,8 +6,8 @@
 
 ROOT          := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../..)
 LIBOQS_PREFIX ?= $(ROOT)/vendor/install
-# OpenSSL: prefer Homebrew openssl@3 on macOS, else system.
-OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3 2>/dev/null || echo /usr)
+# OpenSSL: prefer the pinned keg-only Homebrew openssl@3.5 on macOS, else system.
+OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3.5 2>/dev/null || echo /usr)
 BENCH_CFLAGS  ?= -O3
 
 CC     ?= cc

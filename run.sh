@@ -22,7 +22,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TOOL_VERSION="0.1.0"
+TOOL_VERSION="0.2.0"
 # shellcheck source=setup/lib_platform.sh
 source "$ROOT/setup/lib_platform.sh"
 # shellcheck source=setup/versions.env
@@ -134,7 +134,7 @@ TS_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 START_EPOCH="$(date +%s)"
 
 # ---- build harness if needed -----------------------------------------------
-OSSL_PREFIX_FOR_BUILD="${OPENSSL_PREFIX:-$(brew --prefix openssl@3 2>/dev/null || echo /usr)}"
+OSSL_PREFIX_FOR_BUILD="${OPENSSL_PREFIX:-$(brew --prefix openssl@3.5 2>/dev/null || echo /usr)}"
 if [ ! -x "$ROOT/bench/kem_sig/bench_pq" ] || [ "$ROOT/bench/kem_sig/bench_pq.c" -nt "$ROOT/bench/kem_sig/bench_pq" ]; then
   pqb_log "building bench_pq harness"
   make -C "$ROOT/bench/kem_sig" \

@@ -38,7 +38,7 @@ TASKSET="${PQB_TASKSET:-}"
 
 # ---- choose the OpenSSL that has the provider ------------------------------
 OSSL="${OPENSSL_BIN:-$(command -v openssl)}"
-OSSL_PREFIX="${OPENSSL_PREFIX:-$(brew --prefix openssl@3 2>/dev/null || echo /usr)}"
+OSSL_PREFIX="${OPENSSL_PREFIX:-$(brew --prefix openssl@3.5 2>/dev/null || echo /usr)}"
 PROV_MODULE="${OQSPROVIDER_MODULE:-}"
 PROV_ARGS=""
 HAVE_OQS=0
@@ -108,6 +108,24 @@ ca_for()  { case "$1" in "$BASE_SIG") echo "$PKI/base_${BASE_SIG}_ca.pem";; *) e
 crt_for() { case "$1" in "$BASE_SIG") echo "$PKI/base_${BASE_SIG}_server.pem";; *) echo "$PKI/pq_${1}_server.pem";; esac; }
 key_for() { case "$1" in "$BASE_SIG") echo "$PKI/base_${BASE_SIG}_server.key";; *) echo "$PKI/pq_${1}_server.key";; esac; }
 
+# Migration-phase classification for a (kem_group, sig_alg) cell:
+#   baseline = classical KEM group + classical signature (what Logos runs today)
+#   phase0   = PQ or hybrid KEM group + CLASSICAL signature (HNDL protection)
+#   phase2   = PQ signature (regardless of group)
+phase_for() {
+  local kem_l sig_l pq_kem=0
+  kem_l="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  sig_l="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+  case "$kem_l" in
+    *mlkem*|*kyber*|*frodo*|*hqc*|*bike*|*ntru*|*mceliece*) pq_kem=1 ;;
+  esac
+  case "$sig_l" in
+    ed25519|ed448|ecdsa*|rsa*|ecdsap*)
+      if [ "$pq_kem" = 1 ]; then echo phase0; else echo baseline; fi ;;
+    *) echo phase2 ;;
+  esac
+}
+
 # run one matrix cell -> appends JSON object to $ROWS file
 run_cell() {
   local kem="$1" sig="$2"
@@ -115,7 +133,9 @@ run_cell() {
   # shellcheck disable=SC2086
   $TASKSET "$BENCH" --group "$kem" --ca "$(ca_for "$sig")" \
       --cert "$(crt_for "$sig")" --key "$(key_for "$sig")" \
-      --connections "$CONNS" --warmup "$WARMUP" --label "$label" 2>>"$PKI/bench_tls.err"
+      --connections "$CONNS" --warmup "$WARMUP" --label "$label" \
+      --sig-alg "$sig" --phase "$(phase_for "$kem" "$sig")" \
+      --implementation oqs-provider 2>>"$PKI/bench_tls.err"
 }
 
 ROWS="$PKI/rows.jsonl"; : > "$ROWS"

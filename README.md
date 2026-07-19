@@ -10,7 +10,6 @@ uses *today* (X25519 key exchange + Ed25519 signatures) to PQ candidates cost on
 validator-grade hardware? Every chart draws that classical baseline as the
 reference line, so the PQ "tax" is always visible.
 
-Phase 1 covers **PQ KEMs**, **PQ signatures**, and **PQ TLS 1.3 handshakes**.
 Hooks are left for a later SNARK/STARK phase (see `config.yaml`); it is not
 implemented yet.
 
@@ -18,15 +17,60 @@ implemented yet.
 
 ## What gets measured
 
+The benchmark targets **four measurement groups**, all landing in the same
+self-describing results JSON and distinguished by a per-row `implementation`
+field:
+
+1. **liboqs — KEM + signatures** *(implemented)*: ML-KEM, Classic McEliece,
+   FrodoKEM, ML-DSA, Falcon, SLH-DSA, plus the classical X25519/Ed25519
+   baselines via OpenSSL EVP (`implementation: liboqs` / `openssl`).
+2. **RustCrypto — KEM + signatures** *(arriving in a later stage)*: the
+   pure-Rust `ml-kem` / `ml-dsa` / `slh-dsa` crates as an independent second
+   source (`implementation: rustcrypto`). Only these three families have mature
+   pure-Rust implementations — Falcon, Classic McEliece and FrodoKEM cells stay
+   genuinely absent rather than being filled by an FFI wrapper, which would not
+   be an independent source.
+3. **TLS 1.3 handshakes by migration phase** *(oqs-provider matrix implemented;
+   OpenSSL-native path arriving in a later stage)*:
+   `implementation: oqs-provider` today, `openssl-native` next.
+4. **rustls + aws-lc-rs TLS 1.3 handshakes** *(arriving in a later stage)*:
+   the Rust TLS stack as an independent protocol-layer implementation
+   (`implementation: rustls-awslc`).
+
 | Layer | Metrics |
 |-------|---------|
-| **KEM** | keygen / encaps / decaps wall-clock (median, MAD, IQR, min, max, mean, stddev, ops/sec) · pk/sk/ct sizes · heap high-water |
-| **Signature** | keygen / sign / verify wall-clock (same stats) · pk/sig sizes |
-| **TLS 1.3** | full-handshake latency · handshakes/sec · bytes-on-wire · ClientHello size (+ fragmentation flag) — as a matrix of (KEM group × signature) |
+| **KEM** | keygen / encaps / decaps wall-clock (median, MAD, IQR, min, max, mean, stddev, ops/sec) · a keygen+encaps+decaps total · pk/sk/ct sizes · heap high-water |
+| **Signature** | keygen / sign / verify wall-clock (same stats) · a keygen+sign+verify total · pk/sig sizes |
+| **TLS 1.3** | full-handshake latency · handshakes/sec · bytes-on-wire · ClientHello size (+ fragmentation flag) · a per-cell primitive-operation sum (below) — as a matrix of (KEM group × signature) |
 
 The **classical baseline** (X25519 / Ed25519 / X25519+Ed25519) is always
 included as the reference point — measured as a real primitive via OpenSSL, not
 hand-waved.
+
+### Migration phases (TLS)
+
+Every TLS matrix cell carries a `phase` field from our migration framework:
+
+- **`baseline`** — classical KEM group + classical signature
+  (X25519 + Ed25519): what Logos runs today.
+- **`phase0`** — PQ or hybrid KEM group + **classical** signature
+  (e.g. X25519MLKEM768 + Ed25519): the harvest-now-decrypt-later protection
+  actually deployed on today's internet.
+- **`phase2`** — PQ signature (e.g. X25519MLKEM768 + ML-DSA-65): full PQ
+  authentication.
+
+### Per-operation values vs totals
+
+Per-operation medians (±MAD) remain the primary data. In addition, every
+KEM/sig row carries a `total.sum_of_medians_ns` aggregate, and every enabled
+TLS cell carries a `handshake_primitive_sum` block: the sum of the primitive
+operations that one handshake actually performs (hybrid groups include **both**
+components — e.g. X25519MLKEM768 = 2× X25519 keygen + 2× derive + ML-KEM-768
+keygen/encaps/decaps — plus the signature sign + verifies), with the exact
+component list, counts and medians spelled out in the JSON so the number is
+auditable. These are **sums of medians** — derived figures, labelled as such,
+not measured latencies; the gap between `handshake_primitive_sum` and the
+measured handshake latency is the protocol overhead.
 
 ---
 
@@ -55,10 +99,11 @@ pq-bench-rpi5/
 
 ```bash
 git clone <this repo> && cd pq-bench-rpi5
-./setup/setup.sh                 # build + pin liboqs, OpenSSL 3.5+, oqs-provider
+./setup/setup.sh                 # build + pin liboqs, OpenSSL 3.5.x, oqs-provider
 sudo ./run.sh                    # sudo only to set the performance governor (see below)
-python3 analyze/merge.py results/*.json -o dashboard/data/merged.json
-# open dashboard/index.html (or deploy dashboard/ to GitHub Pages)
+python3 analyze/merge.py results/<your-file>.json -o dashboard/data/merged.json
+# view the dashboard over HTTP (see dashboard/README.md):
+#   cd dashboard && python3 -m http.server 8000
 ```
 
 **On `sudo`:** it is **optional, not a prerequisite.** The only thing it does is
@@ -75,7 +120,7 @@ override the `config.yaml` knobs.
 ### On macOS (development / smoke testing only)
 
 ```bash
-brew install cmake openssl@3 git
+brew install cmake openssl@3.5 git   # keg-only 3.5.x — the pinned OpenSSL line
 ./setup/setup.sh
 ./run.sh --smoke                 # produces valid JSON; stamped is_baseline_grade=false
 ```
@@ -245,9 +290,19 @@ All `bench_pq.c` references are `bench/kem_sig/bench_pq.c`.
 ## Reproducibility & provenance
 
 - **Pinned versions** live in `setup/versions.env` (liboqs `0.15.0`, OpenSSL
-  `3.5.0`/`≥3.5`, oqs-provider `0.9.0`). After cloning, `setup.sh` records the
-  **actually resolved git commits** and the **exact build flags + compiler
-  version** into `setup/versions.lock`.
+  pinned to the **3.5.x LTS line** on every platform — keg-only Homebrew
+  `openssl@3.5` on macOS, Debian 13's system 3.5.x on the Pi — so cross-machine
+  TLS numbers never compare different OpenSSL minor lines; oqs-provider
+  `0.9.0`). After cloning, `setup.sh` records the **actually resolved git
+  commits** and the **exact build flags + compiler version** into
+  `setup/versions.lock`.
+- **Results schema `2.0.0`.** Every KEM/sig row carries `implementation`
+  (which library produced the measurement: `liboqs`, `openssl`, `rustcrypto`,
+  `oqs-provider`, `openssl-native`, `rustls-awslc`; formerly named `backend`),
+  and every TLS cell carries `implementation` + `phase` + `sig_alg` and the
+  `handshake_primitive_sum` block. Older (schema `1.0.0`) result files are
+  **never rewritten** — `analyze/merge.py` injects the equivalent values at
+  merge time (`backend`→`implementation`, phase inference, derived totals).
 - **Every results JSON carries full environment metadata**: RPi model, RAM,
   kernel, OS, governor, the clock/temp trace during the run, compiler version,
   liboqs/oqs-provider/OpenSSL versions+commits, build flags, and the candidate
@@ -287,8 +342,19 @@ list of reasons.
   Code-based + conservative-LWE backups: Classic McEliece
   348864/460896/460896f/6688128/6960119/8192128 (tiny ciphertext, slow keygen)
   and FrodoKEM 640/976/1344-AES (unstructured LWE). Baseline: **X25519**.
-- **Signatures:** ML-DSA-44/65/87; SLH-DSA (SPHINCS+) variants;
-  Falcon/FN-DSA-512/1024. Baseline: **Ed25519**.
+- **Signatures:** ML-DSA-44/65/87; hash-based **both** SLH-DSA (FIPS 205 final,
+  `SLH_DSA_PURE_SHA2_{128s,128f,192f,256f}`) **and** the round-3
+  `SPHINCS+-SHA2-*-simple` sets; Falcon/FN-DSA-512/1024. Baseline: **Ed25519**.
+
+  > **Comparability note (SPHINCS+ vs SLH-DSA).** Round-3 SPHINCS+ and FIPS 205
+  > SLH-DSA are **different algorithms**, not a relabelling. The three published
+  > RPi5 baselines measured only the SPHINCS+ sets; the config now measures
+  > both generations side by side, so new runs (a) stay directly comparable to
+  > those baselines via the SPHINCS+ rows and (b) add the standardised SLH-DSA
+  > numbers. Don't compare an SLH-DSA row against an old SPHINCS+ row as if
+  > they were the same scheme. The SLH-DSA identifiers exist in our pinned
+  > liboqs 0.15.0 build, so this needs no library upgrade; liboqs 0.16.0
+  > removes SPHINCS+ entirely, at which point the SPHINCS+ rows retire.
 - **TLS:** matrix of configured KEM groups × signature algorithms, always
   including the classical **X25519 + Ed25519** pair.
 
@@ -304,9 +370,11 @@ anything your liboqs build doesn't enable (and says so).
 ## Output & analysis
 
 - `results/<hostname>-<timestamp>.json` — one self-describing file per run.
-- `analyze/merge.py results/*.json -o dashboard/data/merged.json` — merge runs
-  from many machines into one dataset (keeps each run distinct; never mixes
-  baseline with smoke).
+- `analyze/merge.py` — with **no arguments**, merges the **published set**
+  pinned in `analyze/published_runs.txt` into `dashboard/data/merged.json`
+  (explicit manifest, so ad-hoc dev runs in `results/` never leak into the
+  published dataset); pass explicit files/globs for an ad-hoc merge. Keeps
+  each run distinct; never mixes baseline with smoke.
 - `analyze/plot.py` — matplotlib PNGs for papers (optional; install into
   `analyze/.venv` via `analyze/requirements.txt` to keep system python clean —
   it gracefully skips if matplotlib is absent).
@@ -394,10 +462,11 @@ git commit -m "results: RPi5 baseline from <your-handle>"
 - [ ] full run (not `--smoke`): `run.timed_iters` is the `config.yaml` value, not 25
 - [ ] unmodified candidate list (or extensions noted in the PR description)
 
-Once merged, your file joins `results/`; anyone can regenerate the aggregated
-dataset and dashboard with
-`python3 analyze/merge.py results/*.json -o dashboard/data/merged.json`. The
-dashboard's run selector will then include your Pi alongside everyone else's.
+Once merged, your file joins `results/` and gets a line in
+`analyze/published_runs.txt` (the explicit manifest of published runs); anyone
+can then regenerate the aggregated dataset and dashboard with
+`python3 analyze/merge.py`. The dashboard's run selector will then include
+your Pi alongside everyone else's.
 
 > Prefer not to use GitHub? Open an issue and attach the JSON file instead — a
 > maintainer will add it.

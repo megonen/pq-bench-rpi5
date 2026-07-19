@@ -8,7 +8,10 @@
  * Emits a single JSON object describing the algorithm to stdout. The orchestrator
  * (run.sh / assemble.py) wraps these with environment metadata.
  *
- * Two backends, selected by algorithm name:
+ * Two implementations, selected by algorithm name (emitted per row in the
+ * "implementation" field — the schema dimension that distinguishes library
+ * sources: liboqs / openssl / rustcrypto / oqs-provider / openssl-native /
+ * rustls-awslc; this harness emits the first two):
  *   - liboqs            : all PQ candidates (ML-KEM, ML-DSA, Falcon, SLH-DSA, ...)
  *   - OpenSSL EVP       : the classical Logos baselines X25519 (KEM-analog) and
  *                         Ed25519 (signature), which liboqs does not implement.
@@ -341,7 +344,7 @@ static int kem_decaps(void *c){ kem_ctx*x=c;
 static int run_kem(const char *alg, const bench_cfg *cfg) {
     OQS_KEM *kem = OQS_KEM_new(alg);
     if (!kem) {
-        printf("{\"alg\":\"%s\",\"kind\":\"kem\",\"backend\":\"liboqs\",\"enabled\":false,"
+        printf("{\"alg\":\"%s\",\"kind\":\"kem\",\"implementation\":\"liboqs\",\"enabled\":false,"
                "\"reason\":\"not enabled in this liboqs build\"}\n", alg);
         return 0;
     }
@@ -369,7 +372,7 @@ static int run_kem(const char *alg, const bench_cfg *cfg) {
     must_measure(alg,"encaps",kem_encaps,&x,cfg,&en);
     must_measure(alg,"decaps",kem_decaps,&x,cfg,&de);
 
-    printf("{\"alg\":\"%s\",\"kind\":\"kem\",\"backend\":\"liboqs\",\"enabled\":true,", alg);
+    printf("{\"alg\":\"%s\",\"kind\":\"kem\",\"implementation\":\"liboqs\",\"enabled\":true,", alg);
     printf("\"claimed_nist_level\":%d,", kem->claimed_nist_level);
     printf("\"sizes\":{\"public_key\":%zu,\"secret_key\":%zu,\"ciphertext\":%zu,\"shared_secret\":%zu},",
            kem->length_public_key, kem->length_secret_key, kem->length_ciphertext, kem->length_shared_secret);
@@ -412,7 +415,7 @@ static int sig_verify(void *c){ sig_ctx*x=c;
 static int run_sig(const char *alg, const bench_cfg *cfg) {
     OQS_SIG *sig = OQS_SIG_new(alg);
     if (!sig) {
-        printf("{\"alg\":\"%s\",\"kind\":\"sig\",\"backend\":\"liboqs\",\"enabled\":false,"
+        printf("{\"alg\":\"%s\",\"kind\":\"sig\",\"implementation\":\"liboqs\",\"enabled\":false,"
                "\"reason\":\"not enabled in this liboqs build\"}\n", alg);
         return 0;
     }
@@ -438,7 +441,7 @@ static int run_sig(const char *alg, const bench_cfg *cfg) {
     must_measure(alg,"sign",  sig_sign,  &x,cfg,&sg);
     must_measure(alg,"verify",sig_verify,&x,cfg,&vf);
 
-    printf("{\"alg\":\"%s\",\"kind\":\"sig\",\"backend\":\"liboqs\",\"enabled\":true,", alg);
+    printf("{\"alg\":\"%s\",\"kind\":\"sig\",\"implementation\":\"liboqs\",\"enabled\":true,", alg);
     printf("\"claimed_nist_level\":%d,", sig->claimed_nist_level);
     printf("\"sizes\":{\"public_key\":%zu,\"secret_key\":%zu,\"signature\":%zu},",
            sig->length_public_key, sig->length_secret_key, sig->length_signature);
@@ -509,7 +512,7 @@ static int run_x25519(const bench_cfg *cfg) {
     if (x25519_keygen(&x) != 0) die("X25519","keygen failed");
     must_measure("X25519","derive",x25519_derive,&x,cfg,&dv);
 
-    printf("{\"alg\":\"X25519\",\"kind\":\"kem\",\"backend\":\"openssl\",\"classical\":true,\"enabled\":true,");
+    printf("{\"alg\":\"X25519\",\"kind\":\"kem\",\"implementation\":\"openssl\",\"classical\":true,\"enabled\":true,");
     printf("\"claimed_nist_level\":1,");
     printf("\"sizes\":{\"public_key\":32,\"secret_key\":32,\"ciphertext\":null,\"shared_secret\":32},");
     printf("\"operations\":{");
@@ -569,7 +572,7 @@ static int run_ed25519(const bench_cfg *cfg) {
     must_measure("Ed25519","sign",  ed_sign,  &x,cfg,&sg);
     must_measure("Ed25519","verify",ed_verify,&x,cfg,&vf);
 
-    printf("{\"alg\":\"Ed25519\",\"kind\":\"sig\",\"backend\":\"openssl\",\"classical\":true,\"enabled\":true,");
+    printf("{\"alg\":\"Ed25519\",\"kind\":\"sig\",\"implementation\":\"openssl\",\"classical\":true,\"enabled\":true,");
     printf("\"claimed_nist_level\":1,");
     printf("\"sizes\":{\"public_key\":32,\"secret_key\":32,\"signature\":64},");
     printf("\"operations\":{");

@@ -1,15 +1,17 @@
 # Published dashboard dataset — the ONLY results files merged into
 # dashboard/data/merged.json when analyze/merge.py runs without arguments.
 #
+# Membership criterion: the file is in the published Logos snapshot and cited
+# by the companion document's provenance section — NOT merely git-tracked here.
 # Paths are relative to results/. Publishing a new run = adding a line here
 # (and un-ignoring the file in .gitignore); dev/smoke runs sitting in results/
 # never leak into the published dataset by accident.
 #
-# The three baseline-grade RPi5 runs cited in the companion document:
-rasberrypi5-20260608T223040Z.json
-rasberrypi5-20260614T205226Z.json
+# Consolidated baseline-grade RPi5 run (13 KEM + 10 sig + 26 TLS cells):
 rasberrypi5-20260625T202356Z.json
-# Mac (Apple M3) cross-platform comparison run — deliberately published
-# (tuned-vs-portable comparison; NOT baseline-grade, dashboard hides it by
-# default). Remove this line if the published set should be Pi-only.
-mehmetmac-20260624T140033Z.json
+# Consolidated Mac (Apple M3) cross-platform run (13 KEM + 10 sig + 26 TLS
+# cells; NOT baseline-grade by design — dashboard hides it by default):
+mehmetmac-20260625T220618Z.json
+# Community RPi5 run cited by the companion document. NOTE: not yet present in
+# this repo's results/ — merge.py warns and skips until the file is added.
+thomas-pi-20260703T083302Z.json

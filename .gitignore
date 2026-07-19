@@ -47,3 +47,9 @@ analyze/.venv/
 __pycache__/
 *.pyc
 .DS_Store
+# Consolidated Mac (Apple M3) run in the published Logos snapshot; cited by the
+# companion document's provenance section (supersedes 20260624T140033Z, which
+# was KEM/sig only — no TLS cells).
+!results/mehmetmac-20260625T220618Z.json
+# Community RPi5 run cited by the companion document (file to be added).
+!results/thomas-pi-20260703T083302Z.json

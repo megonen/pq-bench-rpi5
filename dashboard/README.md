@@ -22,9 +22,11 @@ directory as-is).
 
 `data/merged.json` is produced by `analyze/merge.py` (schema `2.0.0`). Run with
 no arguments it merges exactly the files pinned in
-`analyze/published_runs.txt` — currently the three baseline-grade RPi5 runs
-plus the published Mac (Apple M3) cross-platform comparison run (not
-baseline-grade; hidden by the dashboard's default filter). Ad-hoc dev runs in
+`analyze/published_runs.txt` — the published Logos snapshot set cited by the
+companion document's provenance section: the consolidated baseline-grade RPi5
+run, the consolidated Mac (Apple M3) cross-platform run (not baseline-grade;
+hidden by the dashboard's default filter), and the community RPi5 run
+(`thomas-pi-*`; merged once its file lands in `results/`). Ad-hoc dev runs in
 `results/` never enter the published dataset unless added to that manifest.
 
 Contents:

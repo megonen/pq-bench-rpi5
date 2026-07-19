@@ -133,6 +133,7 @@ def flatten(runs):
                     "iqr_ns": st.get("iqr"), "min_ns": st.get("min"),
                     "stddev_ns": st.get("stddev"), "ops_per_sec": st.get("ops_per_sec"),
                     "total_sum_of_medians_ns": row_total(k),
+                    "acceleration": k.get("acceleration"),
                     "sizes": k.get("sizes")})
         for s in run.get("sig", []):
             if not s.get("enabled"):
@@ -148,6 +149,7 @@ def flatten(runs):
                     "iqr_ns": st.get("iqr"), "min_ns": st.get("min"),
                     "stddev_ns": st.get("stddev"), "ops_per_sec": st.get("ops_per_sec"),
                     "total_sum_of_medians_ns": row_total(s),
+                    "acceleration": s.get("acceleration"),
                     "sizes": s.get("sizes")})
         tls = run.get("tls") or {}
         for cell in (tls.get("matrix") or []):

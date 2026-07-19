@@ -21,8 +21,16 @@ per operation** to your Pi's speed, so results stay comparable across machines.
 
   ```sh
   openssl version                    # want 3.5.x
-  openssl list -kem-algorithms | grep -i mlkem   # want ML-KEM entries
+  openssl list -kem-algorithms | grep -i mlkem     # want ML-KEM entries
+  # the native TLS matrix additionally needs (unverified on a Pi so far —
+  # expected present in any stock 3.5.x build):
+  openssl list -tls-groups | tr ':' '\n' | grep -i mlkem   # MLKEM512/768/1024 + hybrids
+  openssl list -tls-signature-algorithms | tr ':' '\n' | grep -i mldsa  # mldsa44/65/87
   ```
+
+  If the native MLKEM TLS groups are missing, `run.sh` skips the
+  `openssl-native` TLS matrix with a warning and the oqs-provider matrix still
+  runs.
 
   If your OS ships an older OpenSSL, `./setup/setup.sh` falls back to building
   the pinned `openssl-3.5.7` from source automatically (adds ~15–30 min).

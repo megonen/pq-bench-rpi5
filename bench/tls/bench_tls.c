@@ -53,6 +53,15 @@ static double pct(const uint64_t *s, uint64_t n, double p) {
     return (double)s[lo] + f * ((double)s[lo + 1] - (double)s[lo]);
 }
 
+/* OSSL_PROVIDER_do_all callback: flag any active provider whose name looks
+ * like an OQS provider (native-mode assertion). */
+static int check_no_oqs_provider(OSSL_PROVIDER *prov, void *cbdata) {
+    const char *name = OSSL_PROVIDER_get0_name(prov);
+    if (name && strstr(name, "oqs") != NULL)
+        *(int *)cbdata = 1;
+    return 1;
+}
+
 /* Shuttle all pending bytes from src's mem BIO into dst's mem BIO.
  * Returns bytes moved. */
 static size_t pump(BIO *src, BIO *dst) {
@@ -119,9 +128,26 @@ int main(int argc, char **argv) {
     }
     if (!cert || !key) { fprintf(stderr,"--cert and --key required\n"); return 2; }
 
-    /* providers: default always; oqs if discoverable (OPENSSL_MODULES) */
+    /* Providers: default always. oqsprovider is loaded ONLY when measuring
+     * implementation "oqs-provider". In native mode ("openssl-native") the
+     * provider must not be active at all — a loaded provider can change
+     * algorithm availability and negotiation preference, which would make the
+     * "native" label a lie — so we additionally ASSERT that no OQS provider
+     * is loaded and refuse to emit numbers otherwise. */
     OSSL_PROVIDER_load(NULL, "default");
-    int have_oqs = OSSL_PROVIDER_load(NULL, "oqsprovider") != NULL;
+    int native = strcmp(implementation, "oqs-provider") != 0;
+    int have_oqs = 0;
+    if (!native)
+        have_oqs = OSSL_PROVIDER_load(NULL, "oqsprovider") != NULL;
+    else {
+        int oqs_active = 0;
+        OSSL_PROVIDER_do_all(NULL, check_no_oqs_provider, &oqs_active);
+        if (oqs_active) {
+            fprintf(stderr, "[bench_tls] FATAL: an OQS provider is active in "
+                            "native mode — refusing to emit numbers\n");
+            return 1;
+        }
+    }
 
     SSL_CTX *cctx = SSL_CTX_new(TLS_client_method());
     SSL_CTX *sctx = SSL_CTX_new(TLS_server_method());

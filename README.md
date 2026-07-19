@@ -47,9 +47,21 @@ field:
    dependency tree is verified free of liboqs/PQClean/C-FFI. Requires
    cargo/rustc; if absent the group is skipped and the reason recorded in the
    results.
-3. **TLS 1.3 handshakes by migration phase** *(oqs-provider matrix implemented;
-   OpenSSL-native path arriving in a later stage)*:
-   `implementation: oqs-provider` today, `openssl-native` next.
+3. **TLS 1.3 handshakes by migration phase** *(implemented — two stacks)*:
+   - `implementation: openssl-native` — OpenSSL ≥ 3.5's **own** PQC, the
+     production-relevant path. The harness loads no provider for these rows
+     and **asserts at runtime that no OQS provider is active**. Matrix:
+     baseline (X25519+Ed25519), phase0 (X25519MLKEM768, SecP256r1MLKEM768 and
+     pure MLKEM512/768/1024, each + Ed25519 — the harvest-now-decrypt-later
+     configuration), phase2 (X25519MLKEM768 and the pure groups ×
+     ML-DSA-44/65/87, with natively generated ML-DSA certificates).
+   - `implementation: oqs-provider` — the full experimental-provider matrix,
+     kept in full: its ML-DSA cells deliberately overlap the native matrix
+     (same protocol + algorithms under two stacks isolates provider overhead),
+     and its Falcon and SLH-DSA (`sphincssha2128fsimple`) cells exist **only**
+     here — native OpenSSL can issue SLH-DSA certificates but cannot negotiate
+     SLH-DSA in TLS 1.3 (the IETF codepoints are still draft), so that row
+     being provider-only is itself a finding.
 4. **rustls + aws-lc-rs TLS 1.3 handshakes** *(arriving in a later stage)*:
    the Rust TLS stack as an independent protocol-layer implementation
    (`implementation: rustls-awslc`).
@@ -313,6 +325,17 @@ All `bench_pq.c` references are `bench/kem_sig/bench_pq.c`.
   `0.9.0`). After cloning, `setup.sh` records the **actually resolved git
   commits** and the **exact build flags + compiler version** into
   `setup/versions.lock`.
+- **Acceleration provenance, empirically determined.** Every KEM/sig row
+  carries an `acceleration` field with two independent axes: the *arithmetic
+  path* (hand-written asm vs portable code, derived from the recorded build
+  defines / Rust provenance) and the *symmetric path* (which primitive the hot
+  loop uses — AES / SHA-2 / SHA-3-SHAKE / none — where that implementation
+  comes from, and whether it reaches hardware instructions on this CPU). The
+  per-algorithm routing was established by **differential builds** (toggling
+  `OQS_USE_{SHA2,AES,SHA3}_OPENSSL` and measuring which rows move), not by
+  reading configuration — necessary because e.g. liboqs 0.15's SLH-DSA bundles
+  its own portable SHA-2 and ignores the OQS symmetric layer entirely, while
+  its sibling SPHINCS+ routes through it.
 - **Results schema `2.0.0`.** Every KEM/sig row carries `implementation`
   (which library produced the measurement: `liboqs`, `openssl`, `rustcrypto`,
   `oqs-provider`, `openssl-native`, `rustls-awslc`; formerly named `backend`),
@@ -378,8 +401,10 @@ list of reasons.
   `assemble.py` cross-checks that both implementations report identical
   encoded sizes (a mismatch is reported loudly as a bug/spec disagreement,
   never as a benchmark result).
-- **TLS:** matrix of configured KEM groups × signature algorithms, always
-  including the classical **X25519 + Ed25519** pair.
+- **TLS:** two matrices (see "What gets measured"): the `openssl-native` phase
+  matrix (baseline / phase0 / phase2, Ed25519 and ML-DSA certificates) and the
+  full `oqs-provider` matrix — always including the classical
+  **X25519 + Ed25519** pair, measured natively.
 
 Classic McEliece and FrodoKEM are now measured (above). **HQC** is not — it is
 not enabled in the linked liboqs 0.15.0 build (disabled upstream after the

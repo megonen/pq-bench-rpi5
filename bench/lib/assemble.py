@@ -240,6 +240,130 @@ def kem_group_components(group: str):
     return [], [f"no primitive mapping defined for TLS group '{group}'"]
 
 
+# ---- acceleration provenance (per-row, empirically determined) -------------
+# Two independent axes, recorded in the JSON so the companion document's
+# classification cannot drift from reality:
+#   arithmetic — hand-written asm vs portable code (derived from build
+#     provenance: liboqs' *_aarch64 enable defines / the Rust provenance).
+#   symmetric  — which primitive(s) the hot loop uses, where that
+#     implementation comes from, and whether it reaches hardware instructions
+#     on this CPU (combined with the run's cpu_features).
+# Sources for liboqs rows were established by DIFFERENTIAL BUILDS on
+# 2026-07-19/20 (liboqs 0.15.0 @97f6b86, Apple M3): toggling
+# OQS_USE_{SHA2,AES,SHA3}_OPENSSL and measuring which rows move. Key results:
+#   SPHINCS+-SHA2  moved ~54%  when SHA-2 left OpenSSL  -> OQS SHA-2 layer (EVP)
+#   SLH-DSA        moved 0%    on every toggle          -> bundles its own
+#                  portable SHA-2/SHA-3 (verified in slh_dsa_c source)
+#   FrodoKEM-AES   moved 8-13% when AES left OpenSSL    -> OQS AES layer (EVP)
+#   ML-KEM         moved 15-24% when SHA-3 moved to EVP -> OQS SHA-3 layer
+#                  (liboqs-internal xkcp in the shipped config)
+#   ML-DSA/Falcon  <=2% on the SHA-3 toggle (differential inconclusive); the
+#                  pqclean fips202 shim routes them to the OQS SHA-3 layer
+#                  (source inspection), their dominant SHAKE path is simply
+#                  insensitive to the toggle.
+#   McEliece       encaps/decaps flat on every toggle; keygen medians too
+#                  unstable (rejection sampling) for the differential to
+#                  resolve — SHAKE via the fips202 shim per source inspection.
+
+DIFF = "differential-build"
+SRC_INSP = "source-inspection"
+
+
+def _sym(primitive, source, hw, determined_by, note=None):
+    d = {"primitive": primitive, "source": source,
+         "hw_instructions": bool(hw), "determined_by": determined_by}
+    if note:
+        d["note"] = note
+    return d
+
+
+def acceleration_for(row: dict, features: dict, opt_defines: str,
+                     rust_prov: dict) -> dict:
+    impl = row.get("implementation")
+    n = norm_alg(row.get("alg"))
+    aes_hw = features.get("aes")
+    sha2_hw = features.get("sha2")
+    sha3_hw = features.get("sha3")
+
+    if impl == "openssl":  # classical EVP baselines
+        return {"arithmetic": {"path": "openssl-internal",
+                               "detail": "OpenSSL's own curve25519 code (assembly on major targets)"},
+                "symmetric": [],
+                "determined_by": SRC_INSP}
+
+    if impl == "rustcrypto":
+        arith = {"path": "portable-rust",
+                 "detail": "no hand-written asm / explicit SIMD; compiler autovectorisation only"}
+        if n in ("x25519", "ed25519"):
+            arith["detail"] = "curve25519-dalek (portable Rust with formally-derived field arithmetic)"
+            sym = []
+        elif n.startswith("mlkem") or n.startswith("mldsa"):
+            sym = [_sym("sha3-shake", "rust keccak crate (cpufeatures runtime dispatch)",
+                        sha3_hw, SRC_INSP,
+                        "reaches ARMv8.2 SHA3 instructions only where the CPU has them "
+                        "(Apple M-series yes, Cortex-A76 no)")]
+        elif "slhdsa" in n or "sha2" in n:
+            sym = [_sym("sha2", "rust sha2 crate (cpufeatures runtime dispatch)",
+                        sha2_hw, SRC_INSP)]
+        else:
+            sym = []
+        return {"arithmetic": arith, "symmetric": sym, "determined_by": SRC_INSP}
+
+    # ---- liboqs rows --------------------------------------------------------
+    defines = opt_defines or ""
+
+    def asm_enabled(token):
+        return f"{token} 1" in defines
+
+    arith = {"path": "portable-c"}
+    if n.startswith("mlkem"):
+        size = n.replace("mlkem", "")
+        if asm_enabled(f"OQS_ENABLE_KEM_ml_kem_{size}_aarch64"):
+            arith = {"path": "aarch64-asm", "detail": "mlkem-native aarch64 backend"}
+        sym = [_sym("sha3-shake", "OQS SHA-3 layer (liboqs-internal xkcp)", sha3_hw,
+                    DIFF + " (+15-24% when redirected to OpenSSL EVP)")]
+    elif n.startswith("falcon"):
+        size = "512" if "512" in n else "1024"
+        if asm_enabled(f"OQS_ENABLE_SIG_falcon_{size}_aarch64"):
+            arith = {"path": "aarch64-asm", "detail": "falcon aarch64 backend"}
+        sym = [_sym("sha3-shake", "OQS SHA-3 layer (liboqs-internal xkcp)", sha3_hw,
+                    SRC_INSP + " (fips202 shim; differential <=2% — minor SHAKE share)")]
+    elif n.startswith("mldsa"):
+        sym = [_sym("sha3-shake", "OQS SHA-3 layer (liboqs-internal xkcp)", sha3_hw,
+                    SRC_INSP + " (fips202 shim; differential inconclusive at <=2%)")]
+    elif n.startswith("slhdsa"):
+        prim = "sha2" if "sha2" in n else "sha3-shake"
+        sym = [_sym(prim, "bundled portable C inside slh_dsa_c (ignores the OQS symmetric layers)",
+                    False, DIFF + " (0% on every toggle) + " + SRC_INSP)]
+    elif n.startswith("sphincs"):
+        prim = "sha2" if "sha2" in n else "sha3-shake"
+        src = "OQS SHA-2 layer (OpenSSL EVP)" if prim == "sha2" \
+            else "OQS SHA-3 layer (liboqs-internal xkcp)"
+        hw = sha2_hw if prim == "sha2" else sha3_hw
+        det = DIFF + " (~54% slower with liboqs-internal SHA-2)" if prim == "sha2" else SRC_INSP
+        sym = [_sym(prim, src, hw, det)]
+    elif n.startswith("frodokem"):
+        sym = [_sym("aes", "OQS AES layer (OpenSSL EVP)", aes_hw,
+                    DIFF + " (+8-13% with liboqs-internal AES)")]
+        if "shake" in n:
+            sym = [_sym("sha3-shake", "OQS SHA-3 layer (liboqs-internal xkcp)", sha3_hw, SRC_INSP)]
+    elif n.startswith("classicmceliece"):
+        sym = [_sym("sha3-shake", "fips202 shim -> OQS SHA-3 layer", sha3_hw,
+                    SRC_INSP + " (differential flat on encaps/decaps; keygen medians "
+                    "too unstable — rejection sampling — to resolve)")]
+    else:
+        sym = []
+    return {"arithmetic": arith, "symmetric": sym,
+            "determined_by": "; ".join(sorted({s["determined_by"].split(" (")[0] for s in sym}) or [SRC_INSP])}
+
+
+def annotate_acceleration(kem_rows, sig_rows, features, opt_defines, rust_prov):
+    for row in kem_rows + sig_rows:
+        if row.get("enabled"):
+            row["acceleration"] = acceleration_for(row, features or {},
+                                                   opt_defines, rust_prov or {})
+
+
 def cross_check_sizes(kem_rows: list, sig_rows: list, warnings: list) -> None:
     """When the same algorithm is measured by more than one implementation
     (liboqs vs rustcrypto), their reported sizes MUST agree on every field
@@ -268,10 +392,19 @@ def cross_check_sizes(kem_rows: list, sig_rows: list, warnings: list) -> None:
 def annotate_tls(tls: dict, kem_rows: list, sig_rows: list) -> None:
     """Stamp phase/implementation/sig_alg defaults and compute the
     handshake_primitive_sum block for every enabled matrix cell."""
+    # The TLS harness is the C/OpenSSL stack, so its primitive sums must be
+    # priced from the C-stack primitive rows (liboqs / openssl) — never from
+    # rustcrypto rows that happen to share an algorithm name.
+    PREFERRED = ("liboqs", "openssl")
     idx = {}
     for row in kem_rows + sig_rows:
-        if row.get("enabled"):
-            idx[(row.get("kind"), norm_alg(row.get("alg")))] = row
+        if not row.get("enabled"):
+            continue
+        key = (row.get("kind"), norm_alg(row.get("alg")))
+        cur = idx.get(key)
+        if cur is None or (cur.get("implementation") not in PREFERRED
+                           and row.get("implementation") in PREFERRED):
+            idx[key] = row
 
     def component_entries(kind, row, ops_spec, out, missing):
         for op, count, role in ops_spec:
@@ -361,6 +494,8 @@ def main():
             add_row_total(row)
     kem_rows = [r for r in kemsig if r.get("kind") == "kem"]
     sig_rows = [r for r in kemsig if r.get("kind") == "sig"]
+    annotate_acceleration(kem_rows, sig_rows, features,
+                          lock.get("LIBOQS_OPT_DEFINES", ""), rust_toolchain)
     if isinstance(tls, dict):
         annotate_tls(tls, kem_rows, sig_rows)
 

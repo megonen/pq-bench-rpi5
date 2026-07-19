@@ -154,27 +154,56 @@ sig:
     # --- extend here ---
 
 # ---- TLS 1.3 handshake matrix ----------------------------------------------
-# The bench runs (kem_group x sig_alg). The classical baseline pair is ALWAYS
-# included as the reference point regardless of what is listed here.
+# Two implementations, both full TLS 1.3 handshakes over the same in-process
+# harness (bench_tls.c):
+#   openssl-native : OpenSSL >= 3.5's own PQC (production-relevant path); the
+#                    harness ASSERTS no OQS provider is loaded for these rows.
+#   oqs-provider   : liboqs algorithms via the experimental provider; the only
+#                    way to get an SLH-DSA TLS row today (IETF codepoints for
+#                    SLH-DSA in TLS 1.3 are still draft, so native OpenSSL can
+#                    issue SLH-DSA certs but cannot negotiate them).
+# Every cell carries phase: baseline (classical KEM + classical sig),
+# phase0 (PQ/hybrid KEM + classical sig — HNDL protection), phase2 (PQ sig).
+# The classical baseline pair is ALWAYS included, measured natively.
 tls:
   baseline:
     kem_group: X25519
     sig_alg: ed25519        # OpenSSL classical auth Logos uses today
-  # PQ key-exchange groups to test (oqs-provider TLS group names)
+  connections: 1000         # handshakes per cell
+
+  # ---- openssl-native matrix (group/sig names are OpenSSL's own) ----------
+  native:
+    hybrid_groups:
+      - X25519MLKEM768
+      - SecP256r1MLKEM768
+    pure_groups:
+      - MLKEM512
+      - MLKEM768
+      - MLKEM1024
+    classical_sig: ed25519  # phase0 rows (and the baseline cert)
+    # phase2 = X25519MLKEM768 + pure_groups x pq_sigs. SecP256r1MLKEM768 is
+    # phase0-only by design (Ed25519 is our classical signature; no ECDSA).
+    pq_sigs:
+      - ML-DSA-44
+      - ML-DSA-65
+      - ML-DSA-87
+
+  # ---- oqs-provider matrix (oqs-provider TLS group/sig names) -------------
+  # Kept in full: the ML-DSA cells overlap with the native matrix on purpose
+  # (same protocol + algorithms under two stacks isolates provider overhead),
+  # and the falcon/sphincs cells exist ONLY here.
   kem_groups:
     - X25519MLKEM768
     - SecP256r1MLKEM768
     - mlkem512
     - mlkem768
     - mlkem1024
-  # PQ signature algorithms for the server/CA cert (oqs-provider names)
   sig_algs:
     - mldsa44
     - mldsa65
     - mldsa87
     - falcon512
     - sphincssha2128fsimple
-  connections: 1000         # handshakes timed against a persistent s_server
 
 # ---- future phase (NOT implemented now — hooks only) -----------------------
 # zk:

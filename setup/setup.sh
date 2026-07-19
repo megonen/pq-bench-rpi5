@@ -69,9 +69,14 @@ git_pin() { # repo ref destdir
 # ---------------------------------------------------------------------------
 build_liboqs() {
   choose_cflags
+  # liboqs links libcrypto for AES/SHA-2 (OQS_USE_{AES,SHA2}_OPENSSL default
+  # ON), so it MUST build against the same pinned OpenSSL as everything else —
+  # otherwise bench_pq/bench_tls load two libcrypto versions in one process
+  # and the AES/SHA-2-dependent rows silently measure a different OpenSSL.
+  [ -n "${OPENSSL_PREFIX:-}" ] || locate_or_build_openssl
   local dest="$SRC/liboqs" commit
   commit="$(git_pin "$LIBOQS_REPO" "$LIBOQS_REF" "$dest")"
-  pqb_log "building liboqs ($LIBOQS_REF @ ${commit:0:12}) flags: $BENCH_CFLAGS"
+  pqb_log "building liboqs ($LIBOQS_REF @ ${commit:0:12}) flags: $BENCH_CFLAGS openssl: $OPENSSL_PREFIX"
 
   # OQS_DIST_BUILD=OFF -> native build for the fixed target (no runtime CPU
   # dispatch), so -mcpu=cortex-a76 fully drives codegen. The AArch64-optimized
@@ -84,6 +89,7 @@ build_liboqs() {
     -DOQS_DIST_BUILD=OFF \
     -DOQS_BUILD_ONLY_LIB=OFF \
     -DBUILD_SHARED_LIBS=ON \
+    -DOPENSSL_ROOT_DIR="$OPENSSL_PREFIX" \
     -DCMAKE_C_FLAGS="$BENCH_CFLAGS" >/dev/null
   cmake --build "$dest/build" --parallel "$JOBS" >/dev/null
   cmake --install "$dest/build" >/dev/null

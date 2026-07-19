@@ -35,7 +35,12 @@ field:
    `slh-dsa 0.2.0-rc.5`, plus `x25519-dalek 3.0.0` / `ed25519-dalek 3.0.0`
    for the in-family classical anchors. Signing is **hedged**, matching
    liboqs. Coverage: ML-KEM 512/768/1024, ML-DSA 44/65/87, SLH-DSA SHA2
-   128f/128s/192f/256f, X25519, Ed25519. **Not covered** — Falcon, Classic
+   128f/128s/192f/256f, X25519, Ed25519. Rust signature rows carry **two
+   verify shapes**: `verify` (decode public key from wire bytes + verify —
+   the call shape of both `OQS_SIG_verify` and a TLS handshake) and
+   `verify_cached_key` (pre-parsed key object, expansion amortised — the
+   long-lived-peer pattern); their difference is the pk parse/expansion cost.
+   Totals use `verify`. **Not covered** — Falcon, Classic
    McEliece and FrodoKEM have no mature pure-Rust implementation; those cells
    stay genuinely absent rather than being filled by an FFI wrapper (pqcrypto,
    liboqs-rust, aws-lc-rs), which would not be an independent source. The

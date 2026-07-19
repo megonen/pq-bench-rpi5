@@ -49,6 +49,11 @@ fn provenance_json() -> String {
             "\"crate_versions\":{{\"ml-kem\":\"{}\",\"ml-dsa\":\"{}\",\"slh-dsa\":\"{}\",",
             "\"x25519-dalek\":\"{}\",\"ed25519-dalek\":\"{}\"}},",
             "\"signing_mode\":\"hedged (randomized), matching liboqs 0.15.0 for both ML-DSA and SLH-DSA\",",
+            "\"verify_semantics\":\"verify = decode public key from wire bytes + verify \
+             (matches OQS_SIG_verify, which re-expands from pk bytes per call, and the \
+             per-handshake TLS pattern); verify_cached_key = pre-parsed key object with \
+             expansion amortised (long-lived-peer/validator pattern); the difference is \
+             the pk parse/expansion cost\",",
             "\"code_path_note\":\"{}\"}}"
         ),
         env!("PQB_RUSTC_VERSION"),

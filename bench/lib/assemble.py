@@ -150,11 +150,19 @@ def normalize_kemsig_row(row: dict) -> dict:
     return row
 
 
+# The canonical one-full-cycle operations per row kind. Auxiliary operations
+# (e.g. the rustcrypto rows' `verify_cached_key` variant) are deliberately NOT
+# part of the total — the cycle contains one verify, priced at the wire-bytes
+# (`verify`) shape.
+TOTAL_OPS = ("keygen", "encaps", "decaps", "derive", "sign", "verify")
+
+
 def add_row_total(row: dict) -> None:
     """Aggregate one row's full operation cycle (KEM: keygen+encaps+decaps;
     sig: keygen+sign+verify; the X25519 KEM-analog: keygen+derive)."""
     ops = row.get("operations") or {}
-    medians = {op: (st or {}).get("median") for op, st in ops.items()}
+    medians = {op: (st or {}).get("median")
+               for op, st in ops.items() if op in TOTAL_OPS}
     if not medians or any(v is None for v in medians.values()):
         return
     row["total"] = {

@@ -94,6 +94,8 @@ fn run_ed25519(cfg: &BenchCfg) -> i32 {
         die(alg, "verify failed on a valid signature (broken build)");
     }
 
+    let vk_bytes = vk.to_bytes();
+
     let mut kg_rng = os_rng();
     let mut keygen = || -> Result<(), ()> {
         sink(ed25519_dalek::SigningKey::generate(&mut kg_rng));
@@ -103,7 +105,22 @@ fn run_ed25519(cfg: &BenchCfg) -> i32 {
         sink(sk.sign(&MSG));
         Ok(())
     };
+    // verify = pk from wire bytes + verify (incl. point decompression) — the
+    // TLS/OQS call shape; verify_cached_key = pre-parsed key (validator).
     let mut verify = || -> Result<(), ()> {
+        match ed25519_dalek::VerifyingKey::from_bytes(&vk_bytes) {
+            Ok(v) => {
+                if v.verify(&MSG, &sig).is_ok() {
+                    sink(1u8);
+                    Ok(())
+                } else {
+                    Err(())
+                }
+            }
+            Err(_) => Err(()),
+        }
+    };
+    let mut verify_cached = || -> Result<(), ()> {
         if vk.verify(&MSG, &sig).is_ok() {
             sink(1u8);
             Ok(())
@@ -115,8 +132,14 @@ fn run_ed25519(cfg: &BenchCfg) -> i32 {
     let kg = must_measure(alg, "keygen", &mut keygen, cfg);
     let sg = must_measure(alg, "sign", &mut sign, cfg);
     let vf = must_measure(alg, "verify", &mut verify, cfg);
+    let vc = must_measure(alg, "verify_cached_key", &mut verify_cached, cfg);
 
-    let ops = render_ops(vec![("keygen", kg), ("sign", sg), ("verify", vf)]);
+    let ops = render_ops(vec![
+        ("keygen", kg),
+        ("sign", sg),
+        ("verify", vf),
+        ("verify_cached_key", vc),
+    ]);
     let mut row = String::from(
         "{\"alg\":\"Ed25519\",\"kind\":\"sig\",\"implementation\":\"rustcrypto\",\
          \"classical\":true,\"enabled\":true,\"claimed_nist_level\":1,\
@@ -280,6 +303,7 @@ macro_rules! run_mldsa {
         );
         check_size(alg, "signature", sig.encode().len(), $sig);
         let sk_seed = sk.to_bytes().len();
+        let vk_enc = vk.encode();
 
         let mut kg_rng = os_rng();
         let mut keygen = || -> Result<(), ()> {
@@ -297,7 +321,23 @@ macro_rules! run_mldsa {
                 Err(_) => Err(()),
             }
         };
+        // verify = decode pk from wire bytes + verify: the shape OQS_SIG_verify
+        // measures (it re-expands from pk bytes per call) and the shape TLS
+        // pays per handshake. For ML-DSA the decode expands A_hat, so this is
+        // materially more work than verifying with a cached key object.
         let mut verify = || -> Result<(), ()> {
+            let v = ml_dsa::VerifyingKey::<$P>::decode(&vk_enc);
+            if v.verify(&MSG, &sig).is_ok() {
+                sink(1u8);
+                Ok(())
+            } else {
+                Err(())
+            }
+        };
+        // verify_cached_key = pre-parsed key object, expansion amortised: the
+        // long-lived-peer (validator) pattern. verify - verify_cached_key =
+        // the pk parse/expansion cost.
+        let mut verify_cached = || -> Result<(), ()> {
             if vk.verify(&MSG, &sig).is_ok() {
                 sink(1u8);
                 Ok(())
@@ -309,8 +349,14 @@ macro_rules! run_mldsa {
         let kg = must_measure(alg, "keygen", &mut keygen, $cfg);
         let sg = must_measure(alg, "sign", &mut sign, $cfg);
         let vf = must_measure(alg, "verify", &mut verify, $cfg);
+        let vc = must_measure(alg, "verify_cached_key", &mut verify_cached, $cfg);
 
-        let ops = render_ops(vec![("keygen", kg), ("sign", sg), ("verify", vf)]);
+        let ops = render_ops(vec![
+            ("keygen", kg),
+            ("sign", sg),
+            ("verify", vf),
+            ("verify_cached_key", vc),
+        ]);
         let sizes = format!(
             "\"public_key\":{},\"secret_key\":{},\"signature\":{}",
             $pk, $sk, $sig
@@ -339,6 +385,7 @@ macro_rules! run_slhdsa {
         check_size(alg, "public_key", vk.to_bytes().len(), $pk);
         check_size(alg, "secret_key", sk.to_bytes().len(), $sk);
         check_size(alg, "signature", sig.to_bytes().len(), $sig);
+        let vk_bytes = vk.to_bytes();
 
         let mut kg_rng = os_rng();
         let mut keygen = || -> Result<(), ()> {
@@ -356,7 +403,23 @@ macro_rules! run_slhdsa {
                 Err(_) => Err(()),
             }
         };
+        // verify = pk from wire bytes + verify (OQS/TLS call shape); for
+        // SLH-DSA the key is two small seeds so the decode is near-free —
+        // both shapes are still emitted for row-shape consistency.
         let mut verify = || -> Result<(), ()> {
+            match slh_dsa::VerifyingKey::<$P>::try_from(&vk_bytes[..]) {
+                Ok(v) => {
+                    if v.verify(&MSG, &sig).is_ok() {
+                        sink(1u8);
+                        Ok(())
+                    } else {
+                        Err(())
+                    }
+                }
+                Err(_) => Err(()),
+            }
+        };
+        let mut verify_cached = || -> Result<(), ()> {
             if vk.verify(&MSG, &sig).is_ok() {
                 sink(1u8);
                 Ok(())
@@ -368,8 +431,14 @@ macro_rules! run_slhdsa {
         let kg = must_measure(alg, "keygen", &mut keygen, $cfg);
         let sg = must_measure(alg, "sign", &mut sign, $cfg);
         let vf = must_measure(alg, "verify", &mut verify, $cfg);
+        let vc = must_measure(alg, "verify_cached_key", &mut verify_cached, $cfg);
 
-        let ops = render_ops(vec![("keygen", kg), ("sign", sg), ("verify", vf)]);
+        let ops = render_ops(vec![
+            ("keygen", kg),
+            ("sign", sg),
+            ("verify", vf),
+            ("verify_cached_key", vc),
+        ]);
         let sizes = format!(
             "\"public_key\":{},\"secret_key\":{},\"signature\":{}",
             $pk, $sk, $sig

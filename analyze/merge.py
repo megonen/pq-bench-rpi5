@@ -57,7 +57,12 @@ def row_total(row):
     t = (row.get("total") or {}).get("sum_of_medians_ns")
     if t is not None:
         return t
-    medians = [(st or {}).get("median") for st in (row.get("operations") or {}).values()]
+    # keep in sync with assemble.py TOTAL_OPS: auxiliary ops (e.g.
+    # verify_cached_key) are not part of the one-full-cycle total
+    total_ops = ("keygen", "encaps", "decaps", "derive", "sign", "verify")
+    medians = [(st or {}).get("median")
+               for op, st in (row.get("operations") or {}).items()
+               if op in total_ops]
     if medians and all(m is not None for m in medians):
         return round(sum(medians), 2)
     return None

@@ -59,3 +59,8 @@ bench/rust/target/
 
 # rustls TLS harness build tree (bench/rust-tls — Cargo.lock IS committed)
 bench/rust-tls/target/
+# Consolidated schema-2.0.0 Mac (Apple M3) run: all four measurement groups
+# (liboqs, rustcrypto+dalek, aws-lc-rs pricing rows, three-stack TLS phase
+# matrix), apple-m3 tuned build. Not yet in published_runs.txt — the published
+# set flips wholesale once the Pi companion run exists.
+!results/mehmetmac-20260719T224937Z.json

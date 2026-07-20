@@ -35,16 +35,10 @@ mkdir -p "$SRC" "$PREFIX"
 JOBS="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
 # ---- decide the real optimization flags for THIS host ----------------------
-# We only use -mcpu=cortex-a76 if the compiler accepts it AND we're on aarch64.
+# Detection lives in lib_platform.sh (pqb_choose_cflags): cortex-a76 on Linux
+# aarch64, apple-mN via -mcpu=native on Apple-silicon macOS, fallback elsewhere.
 choose_cflags() {
-  local cc="${CC:-cc}" probe="$SRC/.flagprobe.c"
-  echo 'int main(void){return 0;}' > "$probe"
-  if [ "$PQB_ARCH" = "aarch64" ] && $cc $TARGET_CFLAGS_RPI5 "$probe" -o "$probe.out" 2>/dev/null; then
-    BENCH_CFLAGS="$TARGET_CFLAGS_RPI5"; CFLAGS_TARGET="cortex-a76"
-  else
-    BENCH_CFLAGS="$TARGET_CFLAGS_FALLBACK"; CFLAGS_TARGET="generic-fallback"
-  fi
-  rm -f "$probe" "$probe.out"
+  pqb_choose_cflags
 }
 
 cc_version_string() {

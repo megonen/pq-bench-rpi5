@@ -32,6 +32,13 @@ LOCK="$ROOT/setup/versions.lock"
 
 pqb_detect_platform
 
+# Rust flag parity with the C side (recorded in the Rust provenance blocks):
+# the same host-tuning the C builds got, expressed as target-cpu.
+case "${CFLAGS_TARGET:-}" in
+  cortex-a76)             export RUSTFLAGS="-C target-cpu=cortex-a76" ;;
+  apple-m*|apple-silicon) export RUSTFLAGS="-C target-cpu=native" ;;
+esac
+
 # ---- args ------------------------------------------------------------------
 SMOKE=0; DO_KEMSIG=1; DO_TLS=1
 OVR_ITERS=""; OVR_WARMUP=""; OVR_REPS=""
@@ -180,11 +187,6 @@ fi
 RUST_PROV="$WORK/rust_provenance.json"
 if [ "$DO_KEMSIG" = 1 ]; then
   if command -v cargo >/dev/null 2>&1; then
-    # Flag parity with the C side: mirror -mcpu=cortex-a76 when that is what
-    # the C harness was built with (recorded either way in the provenance).
-    if [ "${CFLAGS_TARGET:-}" = "cortex-a76" ]; then
-      export RUSTFLAGS="-C target-cpu=cortex-a76"
-    fi
     pqb_log "building Rust harness (cargo build --release --locked)"
     if (cd "$ROOT/bench/rust" && cargo build --release --locked) >"$WORK/rust_build.log" 2>&1; then
       RBIN="$ROOT/bench/rust/target/release/pqb-rust"

@@ -33,6 +33,40 @@ pqb_detect_platform() {
   export PQB_OS PQB_ARCH PQB_IS_RPI PQB_RPI_MODEL
 }
 
+# ---- optimization-target resolution ----------------------------------------
+# Resolve THIS host's tuned build flags (the credibility anchor: identical,
+# host-tuned flags for every candidate; the resolved values go into
+# versions.lock and every results JSON):
+#   Linux aarch64 (the RPi5 target):  -O3 -mcpu=cortex-a76 / "cortex-a76"
+#   Apple-silicon macOS (uname -m is  -O3 -mcpu=native     / "apple-mN"
+#     "arm64", NOT "aarch64" — the      (label from the CPU brand string)
+#     old check missed Macs entirely
+#     and silently fell back to -O3)
+#   anything else:                    $TARGET_CFLAGS_FALLBACK / "generic-fallback"
+# Each candidate flag set is probe-compiled first; a rejected flag falls back
+# rather than failing the build. Rust harnesses mirror this via RUSTFLAGS in
+# run.sh (cortex-a76 -> target-cpu=cortex-a76, apple-m* -> target-cpu=native).
+pqb_choose_cflags() {  # sets + exports BENCH_CFLAGS, CFLAGS_TARGET
+  local cc="${CC:-cc}" tmp probe
+  tmp="$(mktemp -d)" && probe="$tmp/probe.c" && echo 'int main(void){return 0;}' > "$probe"
+  BENCH_CFLAGS="${TARGET_CFLAGS_FALLBACK:--O3}"
+  CFLAGS_TARGET="generic-fallback"
+  # shellcheck disable=SC2086
+  if [ "$PQB_OS" = "linux" ] && [ "$PQB_ARCH" = "aarch64" ] && \
+     $cc ${TARGET_CFLAGS_RPI5:--O3 -mcpu=cortex-a76} "$probe" -o "$probe.out" 2>/dev/null; then
+    BENCH_CFLAGS="${TARGET_CFLAGS_RPI5:--O3 -mcpu=cortex-a76}"
+    CFLAGS_TARGET="cortex-a76"
+  elif [ "$PQB_OS" = "macos" ] && [ "$PQB_ARCH" = "arm64" ] && \
+       $cc -O3 -mcpu=native "$probe" -o "$probe.out" 2>/dev/null; then
+    BENCH_CFLAGS="-O3 -mcpu=native"
+    local brand
+    brand="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'apple silicon')"
+    CFLAGS_TARGET="$(printf '%s' "$brand" | tr '[:upper:] ' '[:lower:]-')"
+  fi
+  rm -rf "$tmp"
+  export BENCH_CFLAGS CFLAGS_TARGET
+}
+
 # ---- friendly logging ------------------------------------------------------
 pqb_log()  { printf '\033[1;34m[pqb]\033[0m %s\n' "$*" >&2; }
 pqb_warn() { printf '\033[1;33m[pqb WARN]\033[0m %s\n' "$*" >&2; }

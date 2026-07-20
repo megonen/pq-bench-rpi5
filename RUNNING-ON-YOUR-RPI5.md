@@ -74,19 +74,31 @@ inside `tmux` so it survives an SSH disconnect.
 ## Step 3 — Run
 
 ```sh
-sudo ./run.sh
+sudo env "PATH=$PATH" ./run.sh
 ```
 
 `sudo` is needed to set the performance governor, pin cores, and read the
-temperature. A full run now takes **roughly 30–40 min on a Pi 5** (estimate,
-not yet measured on a Pi): the last published consolidated run recorded 1351 s
-(~22.5 min); since then the candidate list gained the four FIPS 205 SLH-DSA
-rows next to the four SPHINCS+ rows, and the run gained the whole `rustcrypto`
-measurement group (12 more algorithm sweeps at the same per-op calibration
-budget, plus a one-time `cargo build --release` of a few minutes on the first
-run). Hash-based signing dominates either way. There are no iteration counts
-to set. The OpenSSL-native-TLS and rustls groups land in later stages — this
-guide will state a measured figure when they do.
+temperature. **The `env "PATH=$PATH"` matters**: rustup installs cargo under
+`~/.cargo/bin`, which root's default PATH does not include — plain
+`sudo ./run.sh` would silently skip both Rust measurement groups (with a
+recorded warning, but you'd lose two of the four groups).
+
+A full run now covers **all four measurement groups** (liboqs primitives,
+RustCrypto primitives, aws-lc-rs pricing rows, and the three-stack TLS phase
+matrix: openssl-native / oqs-provider / rustls-awslc, ~60 cells at 1000
+handshakes each). On the Apple M3 the full run measured 36 min; on a Pi 5
+expect **roughly 50–70 min** (estimate, not yet measured on a Pi — the
+hash-based signature rows and the SPHINCS+ TLS cells dominate), plus the
+one-time first-run Rust builds (see prerequisites). There are no iteration
+counts to set.
+
+To exercise the whole pipeline end-to-end first without a publishable-length
+run, use smoke mode — same coverage (all four groups, every TLS stack), one
+repetition per op and 50 handshakes per TLS cell:
+
+```sh
+sudo env "PATH=$PATH" ./run.sh --smoke
+```
 
 Output lands in `results/<hostname>-<timestamp>.json`, stamped with full
 provenance (Pi model, RAM, kernel, governor, thermal trace, library versions)
@@ -134,10 +146,10 @@ hybrid handshakes grow past it and fragment.
 - Measures **liboqs** (C / assembly) implementations, the **RustCrypto
   pure-Rust second source** (`implementation: rustcrypto` rows — same
   methodology, hedged signing like liboqs; Falcon/McEliece/FrodoKEM have no
-  mature pure-Rust implementation and stay absent there), and the oqs-provider
-  TLS matrix. The OpenSSL-native and rustls TLS paths are separate measurement
-  groups arriving in later stages — the results schema already carries the
-  `implementation` and `phase` fields for them.
+  mature pure-Rust implementation and stay absent there), the **aws-lc-rs
+  pricing rows**, and the **three-stack TLS phase matrix** (`openssl-native`,
+  `oqs-provider`, `rustls-awslc`) — see README for what each covers and the
+  caveats that apply.
 - Rust-vs-C gaps are partly **optimisation-path artefacts**, not pure
   implementation quality: liboqs has hand-written aarch64 assembly for ML-KEM,
   the Rust crates are portable Rust. The results JSON records both sides'

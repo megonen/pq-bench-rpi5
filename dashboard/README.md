@@ -52,6 +52,34 @@ Contents:
 Schema-1.0.0 result files are merged compatibly (`backend` →
 `implementation`, phase inferred, totals derived) without rewriting them.
 
-The charts currently group by security level / operation / run; charting of
-the new `implementation` and `phase` dimensions is a planned, separate change —
-the fields are in the data now so old and new merges stay uniform.
+## Views
+
+- **TLS migration phases** — baseline → phase0 → phase2 for a chosen group
+  family and stack, latency and bytes-on-wire side by side, **Pi and Mac in
+  the same chart** (Mac bars translucent), with ×multipliers vs each
+  platform's own classical baseline. The ◆ marker on latency bars is the
+  handshake's **sum of primitive-operation medians** (derived, not measured —
+  labelled as such in the panel); the gap to the bar top is protocol overhead.
+- **Full handshake matrix** — every cell of the selected run, colored by
+  phase, banded by stack; ᵁ marks rows riding unstable cargo features. Plus
+  the ClientHello chart with the ~1400 B MSS line (orange border = fragments).
+- **Cross-implementation primitives** — same algorithm measured by
+  independent implementations (Pi solid / Mac translucent), log axis by
+  default. Acceleration context appears three ways: hatched bars = portable
+  code path (secondary cue), tooltips carry the full per-row acceleration
+  record, and the **always-visible acceleration table** underneath
+  (arithmetic path, symmetric path, per-platform hardware-instruction status)
+  is authoritative — so asm-vs-portable is never mistaken for implementation
+  quality.
+- **Primitives by security level** — the original charts, preserved, with an
+  implementation filter (classical anchors come from the matching family:
+  openssl for liboqs, in-family for the Rust groups) and log axes by default
+  so five orders of magnitude (16 µs ML-KEM keygen … 0.5 s SLH-DSA-128s sign)
+  are all visible; linear toggle for same-magnitude comparison.
+- **Deliberate absences** — disabled rows rendered as cards with their
+  verbatim reasons (SLH-DSA-in-TLS first: unavailable in both production
+  stacks, oqs-provider only). Never bars, never zeros, never filtered away.
+
+Both published runs are **shown by default**: the Pi card is baseline-grade,
+the Mac card is labelled "cross-platform reference — not baseline-grade" with
+its reasons expandable — a labelling distinction, not a visibility one.

@@ -105,8 +105,12 @@ def run_id(run):
 
 
 def flatten(runs):
-    """Produce flat per-(run, algorithm, operation) rows for easy charting."""
+    """Produce flat per-(run, algorithm, operation) rows for easy charting.
+    Deliberately-disabled rows are NOT dropped: they flow into the *_absent
+    arrays with their reasons — absences (e.g. SLH-DSA in TLS) are findings
+    the dashboard must render, not gaps to silently filter."""
     kem_rows, sig_rows, tls_rows = [], [], []
+    kem_absent, sig_absent, tls_absent = [], [], []
     for run in runs:
         rid = run_id(run)
         host = run.get("host", {})
@@ -120,6 +124,9 @@ def flatten(runs):
         }
         for k in run.get("kem", []):
             if not k.get("enabled"):
+                kem_absent.append({**meta, "alg": k.get("alg"),
+                    "implementation": k.get("implementation") or k.get("backend"),
+                    "reason": k.get("reason", "")})
                 continue
             for op, st in (k.get("operations") or {}).items():
                 kem_rows.append({**meta,
@@ -137,6 +144,9 @@ def flatten(runs):
                     "sizes": k.get("sizes")})
         for s in run.get("sig", []):
             if not s.get("enabled"):
+                sig_absent.append({**meta, "alg": s.get("alg"),
+                    "implementation": s.get("implementation") or s.get("backend"),
+                    "reason": s.get("reason", "")})
                 continue
             for op, st in (s.get("operations") or {}).items():
                 sig_rows.append({**meta,
@@ -154,6 +164,15 @@ def flatten(runs):
         tls = run.get("tls") or {}
         for cell in (tls.get("matrix") or []):
             if not cell.get("enabled"):
+                lab = cell.get("label") or ""
+                tls_absent.append({**meta, "label": lab,
+                    "group": cell.get("group"),
+                    "sig_alg": cell.get("sig_alg") or
+                        (lab.split("+", 1)[1] if "+" in lab else ""),
+                    "phase": cell.get("phase") or "",
+                    "implementation": cell.get("implementation") or "oqs-provider",
+                    "unstable_features": cell.get("unstable_features", False),
+                    "reason": cell.get("reason", "")})
                 continue
             label = cell.get("label") or ""
             sig_alg = cell.get("sig_alg") or \
@@ -175,7 +194,8 @@ def flatten(runs):
                 "bytes_total": (cell.get("bytes_on_wire") or {}).get("total"),
                 "client_hello_bytes": cell.get("client_hello_bytes"),
                 "client_hello_fragmented": cell.get("client_hello_fragmented")})
-    return kem_rows, sig_rows, tls_rows
+    return (kem_rows, sig_rows, tls_rows,
+            kem_absent, sig_absent, tls_absent)
 
 
 def main():
@@ -199,7 +219,8 @@ def main():
         sys.exit("no input files matched")
 
     runs = load_runs(paths)
-    kem_rows, sig_rows, tls_rows = flatten(runs)
+    (kem_rows, sig_rows, tls_rows,
+     kem_absent, sig_absent, tls_absent) = flatten(runs)
 
     merged = {
         "merged_schema": MERGED_SCHEMA,
@@ -222,6 +243,9 @@ def main():
         "kem": kem_rows,
         "sig": sig_rows,
         "tls": tls_rows,
+        "kem_absent": kem_absent,
+        "sig_absent": sig_absent,
+        "tls_absent": tls_absent,
     }
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)

@@ -14,16 +14,15 @@ per operation** to your Pi's speed, so results stay comparable across machines.
 - **Raspberry Pi OS / Debian 13 (trixie) or newer** — the benchmark pins
   OpenSSL to the **3.5.x LTS line** on every platform, and Debian 13's system
   `openssl` package is already 3.5.x with the PQC algorithms (ML-KEM / ML-DSA /
-  SLH-DSA) compiled in, so **no OpenSSL source build is needed**. *(Status:
-  verified from Debian packaging metadata — trixie ships `3.5.6-1~deb13u2` and
-  its build rules disable none of the PQC algorithms — but not yet confirmed
-  on a Pi by this project. Check with:)*
+  SLH-DSA) compiled in, so **no OpenSSL source build is needed**. *(Verified on
+  a Pi 5 running trixie's `3.5.6`: the full native surface is present —
+  MLKEM512/768/1024, X25519MLKEM768, SecP256r1MLKEM768, SecP384r1MLKEM1024 and
+  mldsa44/65/87 — and the complete native phase matrix ran without
+  degradation.)* Confirm on your box with:
 
   ```sh
   openssl version                    # want 3.5.x
   openssl list -kem-algorithms | grep -i mlkem     # want ML-KEM entries
-  # the native TLS matrix additionally needs (unverified on a Pi so far —
-  # expected present in any stock 3.5.x build):
   openssl list -tls-groups | tr ':' '\n' | grep -i mlkem   # MLKEM512/768/1024 + hybrids
   openssl list -tls-signature-algorithms | tr ':' '\n' | grep -i mldsa  # mldsa44/65/87
   ```
@@ -46,13 +45,21 @@ per operation** to your Pi's speed, so results stay comparable across machines.
 
   (Debian 13 also packages `rustup` — `sudo apt install rustup && rustup default
   stable` should be equivalent, but that path has not been verified by this
-  project.) The Rust toolchain now covers TWO measurement groups: the
+  project.) The Rust toolchain covers TWO measurement groups: the
   `rustcrypto` primitives (`bench/rust`) and the `rustls-awslc` TLS matrix
   (`bench/rust-tls`). The latter compiles the AWS-LC C library on first build
-  (several extra minutes on a Pi; needs `cmake`, which `setup.sh deps` already
-  installs — unverified on a Pi so far). **Optional:** if cargo is absent,
-  `./run.sh` skips both Rust groups gracefully and records the reasons in the
-  results JSON — the rest of the benchmark is unaffected.
+  (needs `cmake`, which `setup.sh deps` installs; verified working on a Pi 5).
+  **Build both harnesses as your normal user before the sudo run** — otherwise
+  cargo builds them as root and leaves root-owned `target/` directories:
+
+  ```sh
+  (cd bench/rust && cargo build --release --locked)
+  (cd bench/rust-tls && cargo build --release --locked)   # AWS-LC C build: several minutes, once
+  ```
+
+  **Optional:** if cargo is absent, `./run.sh` skips both Rust groups
+  gracefully and records the reasons in the results JSON — the rest of the
+  benchmark is unaffected.
 - **Internet access** and **sudo**.
 
 ## Step 1 — Clone (public repo, no auth)
@@ -74,22 +81,23 @@ inside `tmux` so it survives an SSH disconnect.
 ## Step 3 — Run
 
 ```sh
-sudo env "PATH=$PATH" ./run.sh
+sudo env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" ./run.sh
 ```
 
 `sudo` is needed to set the performance governor, pin cores, and read the
-temperature. **The `env "PATH=$PATH"` matters**: rustup installs cargo under
-`~/.cargo/bin`, which root's default PATH does not include — plain
-`sudo ./run.sh` would silently skip both Rust measurement groups (with a
-recorded warning, but you'd lose two of the four groups).
+temperature. **All three env vars matter** (verified the hard way on a Pi):
+`PATH` alone is NOT enough — root finds `cargo`, but under root's HOME rustup
+cannot resolve a toolchain ("rustup could not choose a version of cargo to
+run") and both Rust measurement groups silently skip (with a recorded
+warning, but you'd lose two of the four groups). `RUSTUP_HOME`/`CARGO_HOME`
+point rustup back at your user install.
 
-A full run now covers **all four measurement groups** (liboqs primitives,
+A full run covers **all four measurement groups** (liboqs primitives,
 RustCrypto primitives, aws-lc-rs pricing rows, and the three-stack TLS phase
 matrix: openssl-native / oqs-provider / rustls-awslc, ~60 cells at 1000
-handshakes each). On the Apple M3 the full run measured 36 min; on a Pi 5
-expect **roughly 50–70 min** (estimate, not yet measured on a Pi — the
-hash-based signature rows and the SPHINCS+ TLS cells dominate), plus the
-one-time first-run Rust builds (see prerequisites). There are no iteration
+handshakes each). **Measured: 36 min on an Apple M3, 29 min (1716 s) on a
+Pi 5** — the Pi is not slower end-to-end because per-op auto-calibration
+targets a fixed measurement budget per operation. There are no iteration
 counts to set.
 
 To exercise the whole pipeline end-to-end first without a publishable-length
@@ -97,7 +105,7 @@ run, use smoke mode — same coverage (all four groups, every TLS stack), one
 repetition per op and 50 handshakes per TLS cell:
 
 ```sh
-sudo env "PATH=$PATH" ./run.sh --smoke
+sudo env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" ./run.sh --smoke
 ```
 
 Output lands in `results/<hostname>-<timestamp>.json`, stamped with full

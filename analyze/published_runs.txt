@@ -7,11 +7,22 @@
 # (and un-ignoring the file in .gitignore); dev/smoke runs sitting in results/
 # never leak into the published dataset by accident.
 #
-# Consolidated baseline-grade RPi5 run (13 KEM + 10 sig + 26 TLS cells):
-rasberrypi5-20260625T202356Z.json
-# Consolidated Mac (Apple M3) cross-platform run (13 KEM + 10 sig + 26 TLS
-# cells; NOT baseline-grade by design — dashboard hides it by default):
-mehmetmac-20260625T220618Z.json
-# Community RPi5 run cited by the companion document (baseline-grade,
-# consolidated: 13 KEM + 10 sig + 26 TLS cells):
-thomas-pi-20260703T083302Z.json
+# ---- current generation (schema 2.0.0: four measurement groups, three-stack
+# ---- TLS phase matrix, SLH-DSA + SPHINCS+ side by side, Frodo AES+SHAKE) ----
+#
+# Consolidated baseline-grade RPi5 run (cortex-a76, OpenSSL 3.5.6, 1716 s,
+# no throttling, zero warnings):
+rasberrypi5-20260720T143239Z.json
+# Consolidated Mac (Apple M3) cross-platform run (apple-m3 / -mcpu=native,
+# OpenSSL 3.5.7; NOT baseline-grade by design — dashboard hides it by default):
+mehmetmac-20260719T224937Z.json
+#
+# ---- retired (schema 1.0.0 generation; files kept in the repo as history) ----
+# The old published set (rasberrypi5-20260625T202356Z, mehmetmac-20260625T220618Z,
+# thomas-pi-20260703T083302Z) predates the SLH-DSA rename and measures none of:
+# the RustCrypto/aws-lc-rs groups, the native/rustls TLS phase matrix, or the
+# FrodoKEM-SHAKE variants — merged next to current-generation runs those files
+# would render mostly blank and their SLH-DSA-labelled rows would silently mean
+# a different algorithm (round-3 SPHINCS+ vs FIPS 205). Thomas's run is retired
+# for the same reason, not for any quality problem — we will ask for a re-run
+# with the new harness and re-list it then.

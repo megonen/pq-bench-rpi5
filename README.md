@@ -166,25 +166,42 @@ pq-bench-rpi5/
   `is_baseline_grade=false` with reasons — only a Raspberry Pi 5 under the
   controlled conditions below produces reference-grade rows.
 
-### On a Raspberry Pi 5 (the real measurement target)
+### The make targets (all platforms — executable documentation)
 
-Follow **[RUNNING-ON-YOUR-RPI5.md](RUNNING-ON-YOUR-RPI5.md)** — it is the
-verified step-by-step (Debian 13 checks included). The short version:
+The setup and run steps live in the **Makefile**, so they can't drift from
+reality the way prose does; `make help` lists everything. The flow:
 
 ```bash
 git clone <this repo> && cd pq-bench-rpi5
-./setup/setup.sh                 # build + pin liboqs, OpenSSL 3.5.x, oqs-provider
-(cd bench/rust && cargo build --release --locked)       # build Rust harnesses as
-(cd bench/rust-tls && cargo build --release --locked)   # your user, not as root
-sudo env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" ./run.sh
-python3 analyze/merge.py results/<your-file>.json -o dashboard/data/merged.json
-# view the dashboard over HTTP (see dashboard/README.md):
-#   cd dashboard && python3 -m http.server 8000
+make check     # read-only: verifies the environment, prints per-platform
+               # install commands for anything missing (installs nothing)
+make deps      # OPT-IN installer for what check reported (add RUST=1 for rustup)
+make build     # C toolchain + bench binaries + both Rust harnesses (as your
+               # user — it refuses to run cargo as root)
+make test      # ~1-2 min verification gate: harness correctness gates, the
+               # three TLS stacks incl. the native no-OQS-provider assertion,
+               # cross-implementation size agreement, schema round-trip;
+               # repo-hygiene checks warn without blocking
+make smoke     # all-four-groups pipeline check (1 rep, 50 handshakes/cell)
+make run       # the full benchmark (~30 min Pi 5 / ~36 min M3)
+make merge     # rebuild dashboard/data/merged.json from the published manifest
+make dashboard # serve the dashboard over HTTP (view only; never mutates data)
 ```
 
-**Why the long sudo line:** rustup installs per-user; under plain `sudo` root
-finds no usable toolchain and both Rust groups silently skip (verified the
-hard way on a Pi — the three env vars are all required).
+`make run`/`make smoke` handle privilege correctly per platform: on Linux they
+use the full `sudo env "PATH=…" "RUSTUP_HOME=…" "CARGO_HOME=…"` form (plain
+`sudo ./run.sh` silently loses both Rust groups — rustup can't resolve a
+toolchain under root's HOME; found the hard way on a Pi). On macOS no sudo is
+used at all. `NOSUDO=1 make run` skips sudo and honestly records the governor
+demerit. `build`'s skip logic uses live checks (artifacts + `openssl version`
+against the lock), never stamp files — upgrading OpenSSL triggers a rebuild
+instead of being silently masked.
+
+### On a Raspberry Pi 5 (the real measurement target)
+
+Follow **[RUNNING-ON-YOUR-RPI5.md](RUNNING-ON-YOUR-RPI5.md)** for the
+Pi-specific context (cooling, PSU, governor, baseline-grade); the commands are
+the same targets: `make check && make build && make test && make run`.
 
 **On `sudo`:** it is **optional, not a prerequisite.** The only thing it does is
 set the CPU governor to `performance` — none of the crypto needs root. `./run.sh`
@@ -199,13 +216,9 @@ override the `config.yaml` knobs.
 
 ### On macOS (cross-platform reference / smoke testing)
 
-```bash
-brew install cmake openssl@3.5 git   # keg-only 3.5.x — the pinned OpenSSL line
-# plus rustup (see Prerequisites) for the two Rust measurement groups
-git clone <this repo> && cd pq-bench-rpi5
-./setup/setup.sh
-./run.sh --smoke                 # produces valid JSON; stamped is_baseline_grade=false
-```
+Same targets: `make check` tells you what to `brew install` (or `make deps`
+does it for you), then `make build && make test && make smoke`. Runs are
+stamped `is_baseline_grade=false` with reasons, by design:
 
 > **macOS runs are cross-platform / smoke data, never baseline-grade — by
 > design, for three concrete reasons:**
@@ -527,15 +540,13 @@ For your numbers to count as baseline-grade, the run must satisfy the
 
 ```bash
 git clone <this repo> && cd pq-bench-rpi5
-./setup/setup.sh                 # build + pin liboqs / OpenSSL 3.5+ / oqs-provider
-(cd bench/rust && cargo build --release --locked)       # as your user (see the
-(cd bench/rust-tls && cargo build --release --locked)   # Pi guide for why)
-sudo env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" ./run.sh
+make check && make build && make test
+make run     # sudo (with the required rustup env) is handled for you
 ```
 
 A full run takes ~30 min on a Pi 5 (hash-based signing dominates). To check the
-pipeline first without committing to the full run, append `--smoke` to the same
-sudo line — but only a **full** run (not `--smoke`) counts as a submission.
+pipeline first without committing to the full run, `make smoke` — but only a
+**full** run (not smoke) counts as a submission.
 
 ### 2. Confirm it's baseline-grade
 

@@ -18,6 +18,10 @@ rasberrypi5-20260720T143239Z.json
 mehmetmac-20260719T224937Z.json
 #
 # ---- retired (schema 1.0.0 generation; files kept in the repo as history) ----
+# NB: rasberrypi5-20260614T205226Z.json additionally serves as the
+# schema-1.0.0 COMPATIBILITY FIXTURE for `make test` (hygiene test 5 in
+# scripts/selftest.sh exercises merge.py's v1 handling against it) — do NOT
+# delete it when tidying retired results.
 # The old published set (rasberrypi5-20260625T202356Z, mehmetmac-20260625T220618Z,
 # thomas-pi-20260703T083302Z) predates the SLH-DSA rename and measures none of:
 # the RustCrypto/aws-lc-rs groups, the native/rustls TLS phase matrix, or the

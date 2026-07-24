@@ -241,7 +241,7 @@ pqb_install_build_deps() {
   if [ "$PQB_OS" = "macos" ]; then
     command -v brew >/dev/null 2>&1 || { pqb_err "Homebrew required on macOS: https://brew.sh"; return 1; }
     pqb_log "installing build deps via Homebrew"
-    brew install cmake ninja openssl@3 git python3 >/dev/null || true
+    brew install cmake ninja openssl@3.5 git python3 >/dev/null || true
   elif [ "$PQB_OS" = "linux" ]; then
     if command -v apt-get >/dev/null 2>&1; then
       pqb_log "installing build deps via apt"

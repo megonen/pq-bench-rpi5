@@ -69,28 +69,34 @@ git clone <REPO_URL>
 cd pq-bench-rpi5
 ```
 
-## Step 2 — Build the toolchain
+## Step 2 — Check, then build
 
 ```sh
-./setup/setup.sh all
+make check   # read-only: verifies OpenSSL/rust/cmake etc., prints apt commands
+             # for anything missing (or 'make deps' installs them for you)
+make build   # C toolchain + bench binaries + both Rust harnesses
+make test    # ~1-2 min verification gate before you spend 30 min measuring
 ```
 
-Takes 5–15 min: installs dependencies and builds liboqs + oqs-provider. Run it
-inside `tmux` so it survives an SSH disconnect.
+The build takes 5–15 min (liboqs dominates; the first Rust-TLS build compiles
+AWS-LC, several more minutes once). Run inside `tmux` so it survives an SSH
+disconnect. `make build` refuses to run cargo as root — build as your normal
+user; only the run itself uses sudo.
 
 ## Step 3 — Run
 
 ```sh
-sudo env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" ./run.sh
+make run
 ```
 
+On Linux this expands to
+`sudo env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" ./run.sh` —
 `sudo` is needed to set the performance governor, pin cores, and read the
-temperature. **All three env vars matter** (verified the hard way on a Pi):
-`PATH` alone is NOT enough — root finds `cargo`, but under root's HOME rustup
-cannot resolve a toolchain ("rustup could not choose a version of cargo to
-run") and both Rust measurement groups silently skip (with a recorded
-warning, but you'd lose two of the four groups). `RUSTUP_HOME`/`CARGO_HOME`
-point rustup back at your user install.
+temperature, and **all three env vars matter** (verified the hard way on a
+Pi): `PATH` alone is NOT enough — root finds `cargo`, but under root's HOME
+rustup cannot resolve a toolchain and both Rust measurement groups silently
+skip. The Makefile bakes the correct form in so nobody has to remember it;
+`NOSUDO=1 make run` skips sudo (governor demerit recorded honestly).
 
 A full run covers **all four measurement groups** (liboqs primitives,
 RustCrypto primitives, aws-lc-rs pricing rows, and the three-stack TLS phase
@@ -105,7 +111,7 @@ run, use smoke mode — same coverage (all four groups, every TLS stack), one
 repetition per op and 50 handshakes per TLS cell:
 
 ```sh
-sudo env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" ./run.sh --smoke
+make smoke
 ```
 
 Output lands in `results/<hostname>-<timestamp>.json`, stamped with full

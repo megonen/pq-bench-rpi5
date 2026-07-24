@@ -128,14 +128,17 @@ Ed25519 baseline drawn as a reference line.
 
 ## Step 5 — Contribute (optional)
 
-Share your `results/*.json` (open a PR or send it over). To merge results from
-multiple machines:
+Share your `results/*.json` (open a PR or send it over). The published
+dashboard dataset is pinned by `analyze/published_runs.txt` (run
+`python3 analyze/merge.py` with no arguments to rebuild exactly that set);
+for an ad-hoc local comparison pass explicit files:
 
 ```sh
-python3 analyze/merge.py results/*.json -o dashboard/data/merged.json
+python3 analyze/merge.py results/<file-a>.json results/<file-b>.json \
+    -o dashboard/data/merged.json
 ```
 
-The dashboard then shows every Pi side by side.
+The dashboard then shows every selected machine side by side.
 
 ## What the results tell you
 

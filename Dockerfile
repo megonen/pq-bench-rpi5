@@ -1,9 +1,14 @@
 # =============================================================================
-# Reproducible BUILD of the PQ benchmark toolchain on Debian aarch64 (the same
-# OS family as Raspberry Pi OS / Ubuntu on the RPi5).
+# Reproducible BUILD of the PQ benchmark C toolchain on Debian aarch64 (the
+# same OS family as Raspberry Pi OS / Ubuntu on the RPi5).
 #
-# This image is for BUILDING ONLY — it pins and compiles liboqs / OpenSSL /
-# oqs-provider reproducibly. It is NOT for running the benchmark.
+# COVERAGE NOTE: C toolchain ONLY (liboqs / OpenSSL / oqs-provider). This image
+# installs no Rust, so the RustCrypto (bench/rust) and rustls (bench/rust-tls)
+# measurement groups are not built here, and the image has not been re-verified
+# since those groups were added. The verified setup paths are the bare-metal
+# ones in README.md / RUNNING-ON-YOUR-RPI5.md.
+#
+# This image is for BUILDING ONLY — it is NOT for running the benchmark.
 #
 #   docker build -t pq-bench-rpi5 .          # build + pin the toolchain
 #

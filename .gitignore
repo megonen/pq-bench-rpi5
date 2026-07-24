@@ -64,3 +64,7 @@ bench/rust-tls/target/
 # matrix), apple-m3 tuned build. Not yet in published_runs.txt — the published
 # set flips wholesale once the Pi companion run exists.
 !results/mehmetmac-20260719T224937Z.json
+# Consolidated schema-2.0.0 RPi5 baseline run (whitelisted here so snapshot
+# copies of this .gitignore don't silently exclude the published baseline;
+# the file was originally force-added on the Pi).
+!results/rasberrypi5-20260720T143239Z.json

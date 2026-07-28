@@ -72,10 +72,15 @@ cd pq-bench-rpi5
 ## Step 2 — Check, then build
 
 ```sh
-make check   # read-only: verifies OpenSSL/rust/cmake etc., prints apt commands
-             # for anything missing (or 'make deps' installs them for you)
-make build   # C toolchain + bench binaries + both Rust harnesses
-make test    # ~1-2 min verification gate before you spend 30 min measuring
+make check   # read-only: verifies OpenSSL incl. its DEV FILES (libssl-dev —
+             # the binary alone is not enough), rust, cmake etc., and prints
+             # apt commands for anything missing ('make deps' installs them)
+make build   # C toolchain + bench binaries + both Rust harnesses; refuses to
+             # link a system liboqs — only the vendored pinned build is
+             # comparable with the published baselines
+make test    # ~1-2 min verification gate (21 checks, incl. ldd-verifying the
+             # binaries link the vendored liboqs) before you spend 30 min
+             # measuring
 ```
 
 The build takes 5–15 min (liboqs dominates; the first Rust-TLS build compiles

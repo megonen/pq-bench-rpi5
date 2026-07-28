@@ -20,7 +20,7 @@ help: ## list targets
 check: ## verify the environment (read-only; prints per-platform install hints)
 	@scripts/check-env.sh
 
-deps: ## OPT-IN: install missing system deps (brew/apt); add RUST=1 for rustup
+deps: ## OPT-IN: install missing system deps (brew/apt/dnf); add RUST=1 for rustup
 	@scripts/install-deps.sh
 
 build: check ## C toolchain (liboqs/OpenSSL/oqs-provider) + bench binaries + Rust harnesses

@@ -151,17 +151,28 @@ pq-bench-rpi5/
 
 ### Prerequisites (all platforms — read this first)
 
-- **OpenSSL ≥ 3.5** (the project pins the 3.5.x LTS line): Debian 13 ships it;
-  macOS uses keg-only Homebrew `openssl@3.5`. Older systems trigger an
-  automatic source build (+15–30 min).
+- **OpenSSL ≥ 3.5 with its DEVELOPMENT files** (the project pins the 3.5.x
+  LTS line): the `openssl` binary alone is **not** enough — liboqs and
+  oqs-provider compile and link against libcrypto, so you need the headers
+  too (`libssl-dev` on Debian, **`openssl-devel` on Fedora/RHEL**, keg-only
+  Homebrew `openssl@3.5` on macOS). `make check` verifies this with a real
+  compile-and-link probe against the exact OpenSSL the build will use and
+  prints the right package name for your platform. Systems older than 3.5
+  trigger an automatic source build (+15–30 min).
 - **Rust toolchain (rustup)** — required for **two of the four measurement
   groups** (RustCrypto primitives and the rustls TLS matrix). Install stable
   via [rustup.rs](https://rustup.rs); if cargo is absent the run completes but
   those groups are skipped (with recorded reasons). The rustls harness
   compiles the AWS-LC C library on first build — several minutes, once.
 - **cmake** (liboqs and the AWS-LC build), a C compiler, **git**, **python3**
-  (stdlib only). `./setup/setup.sh deps` installs the apt packages on
-  Debian-family Linux.
+  (stdlib only). `make deps` installs these on Debian-family (apt),
+  Fedora/RHEL-family (dnf) and macOS (brew); other distros get the package
+  list printed.
+- **liboqs must be the vendored, pinned build — never a system copy.** The
+  harness refuses to link a distro `liboqs-devel`: an unpinned liboqs would
+  silently change what is measured (and the pinned oqs-provider expects
+  exactly the pinned liboqs' headers). `make build` produces the vendored
+  build; `make test` verifies the built binaries actually link it.
 - Any Linux or macOS box works: non-Pi hosts run fine and are stamped
   `is_baseline_grade=false` with reasons — only a Raspberry Pi 5 under the
   controlled conditions below produces reference-grade rows.
@@ -173,15 +184,21 @@ reality the way prose does; `make help` lists everything. The flow:
 
 ```bash
 git clone <this repo> && cd pq-bench-rpi5
-make check     # read-only: verifies the environment, prints per-platform
-               # install commands for anything missing (installs nothing)
-make deps      # OPT-IN installer for what check reported (add RUST=1 for rustup)
+make check     # read-only: verifies the environment — including that the
+               # OpenSSL the build will use has its DEVELOPMENT files
+               # (compile-and-link probe) — and prints per-platform install
+               # commands for anything missing (installs nothing)
+make deps      # OPT-IN installer for what check reported: apt / dnf / brew
+               # per platform (add RUST=1 for rustup)
 make build     # C toolchain + bench binaries + both Rust harnesses (as your
-               # user — it refuses to run cargo as root)
-make test      # ~1-2 min verification gate: harness correctness gates, the
-               # three TLS stacks incl. the native no-OQS-provider assertion,
-               # cross-implementation size agreement, schema round-trip;
-               # repo-hygiene checks warn without blocking
+               # user — it refuses to run cargo as root, and refuses to link
+               # a system liboqs)
+make test      # ~1-2 min verification gate (21 checks): harness correctness
+               # gates, LINK-TARGET verification (vendored liboqs + pinned
+               # OpenSSL, via otool/ldd), the three TLS stacks incl. the
+               # native no-OQS-provider assertion, cross-implementation size
+               # agreement, schema round-trip; repo-hygiene checks warn
+               # without blocking
 make smoke     # all-four-groups pipeline check (1 rep, 50 handshakes/cell)
 make run       # the full benchmark (~30 min Pi 5 / ~36 min M3)
 make merge     # rebuild dashboard/data/merged.json from the published manifest

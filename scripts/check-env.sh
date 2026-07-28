@@ -17,6 +17,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=setup/lib_platform.sh
 source "$HERE/setup/lib_platform.sh"
 pqb_detect_platform
+# test hooks (see also PQB_CHECK_FORCE_OPENSSL / PQB_TEST_OS_RELEASE): let the
+# per-platform failure output be exercised on machines where it can't occur
+[ -n "${PQB_TEST_OS:-}" ] && PQB_OS="$PQB_TEST_OS"
 
 MISSING=0 WARNINGS=0
 
@@ -55,12 +58,58 @@ else
   miss python3 "$(remedy python3)"
 fi
 
-# ---- OpenSSL: same candidate walk setup.sh uses; LibreSSL is not OpenSSL ----
+# ---- OpenSSL --------------------------------------------------------------
+# Two distinct requirements that MUST NOT be conflated (the Fedora lesson:
+# the openssl BINARY was present, `openssl version` passed, and the liboqs
+# cmake build then failed with 'Could NOT find OpenSSL' because the
+# DEVELOPMENT FILES — headers + linkable libcrypto — are a separate package):
+#   1. which OpenSSL the build will use: the SAME candidate walk setup.sh
+#      uses (keg -> PATH -> system). We probe that resolution, not an
+#      independent search — a check that passes while the build links a
+#      different OpenSSL is worse than no check. (This is also why we don't
+#      use plain pkg-config: the pinned keg-only openssl@3.5 on macOS is
+#      deliberately NOT in the pkgconfig path.)
+#   2. whether that candidate's prefix has the dev files: verified by an
+#      actual compile-and-link probe against the prefix, exactly what the
+#      cmake build will attempt.
+# PQB_CHECK_FORCE_OPENSSL forces the candidate (test hook, used to exercise
+# these failure paths on machines where a real one can't occur).
+dev_pkg_hint() {
+  case "$PQB_OS" in
+    macos) echo "brew install openssl@3.5" ;;
+    linux) case "$(pqb_linux_family)" in
+             debian) echo "sudo apt-get install -y libssl-dev" ;;
+             fedora) echo "sudo dnf install -y openssl-devel" ;;
+             arch)   echo "sudo pacman -S openssl" ;;
+             suse)   echo "sudo zypper install libopenssl-devel" ;;
+             *)      echo "install your distribution's OpenSSL development package (headers + libcrypto)" ;;
+           esac ;;
+    *) echo "install OpenSSL development files for your platform" ;;
+  esac
+}
+probe_openssl_dev() { # <prefix> -> 0 if headers + libcrypto link at that prefix
+  local prefix="$1" t; t="$(mktemp -d)"
+  cat > "$t/p.c" <<'EOF'
+#include <openssl/evp.h>
+int main(void) { return EVP_MD_fetch ? 0 : 1; }
+EOF
+  cc "$t/p.c" -I"$prefix/include" -L"$prefix/lib" -L"$prefix/lib64" \
+     -lcrypto -o "$t/p" 2>"$t/err"
+  local rc=$?
+  rm -rf "$t"
+  return $rc
+}
+
 OSSL_FOUND="" OSSL_VER="" OSSL_NOTE=""
-for cand in /opt/homebrew/opt/openssl@3.5/bin/openssl \
-            "$(command -v openssl || true)" \
-            /opt/homebrew/opt/openssl@3/bin/openssl /usr/bin/openssl; do
-  [ -x "$cand" ] || continue
+if [ -n "${PQB_CHECK_FORCE_OPENSSL:-}" ]; then
+  CANDS=("$PQB_CHECK_FORCE_OPENSSL")
+else
+  CANDS=(/opt/homebrew/opt/openssl@3.5/bin/openssl
+         "$(command -v openssl || true)"
+         /opt/homebrew/opt/openssl@3/bin/openssl /usr/bin/openssl)
+fi
+for cand in "${CANDS[@]}"; do
+  [ -n "$cand" ] && [ -x "$cand" ] || continue
   v="$("$cand" version 2>/dev/null || true)"
   case "$v" in
     OpenSSL\ 3.5.*) OSSL_FOUND="$cand"; OSSL_VER="$v"; OSSL_NOTE="pinned 3.5.x line"; break ;;
@@ -68,15 +117,30 @@ for cand in /opt/homebrew/opt/openssl@3.5/bin/openssl \
     LibreSSL*) : ;;  # LibreSSL masquerading as openssl (macOS /usr/bin) — skip
   esac
 done
+
 if [ -n "$OSSL_FOUND" ]; then
   maj="${OSSL_VER#OpenSSL }"; maj="${maj%% *}"
+  OSSL_PREFIX_GUESS="$(dirname "$(dirname "$OSSL_FOUND")")"
   case "$maj" in
-    3.5.*) ok openssl "$OSSL_VER ($OSSL_NOTE) at $OSSL_FOUND" ;;
-    3.[6-9].*|[4-9].*) warn openssl "$OSSL_VER at $OSSL_FOUND — usable but $OSSL_NOTE; cross-machine TLS comparisons should stay on 3.5.x ($(remedy openssl@3.5))" ;;
-    *) warn openssl "$OSSL_VER at $OSSL_FOUND — older than 3.5: setup will SOURCE-BUILD OpenSSL 3.5.x (+15-30 min). To use a system one: $(remedy "openssl@3.5 (macOS) / upgrade to Debian 13")" ;;
+    3.5.*|3.[6-9].*|[4-9].*)
+      # the build will use this prefix -> its dev files are REQUIRED
+      if probe_openssl_dev "$OSSL_PREFIX_GUESS"; then
+        case "$maj" in
+          3.5.*) ok openssl "$OSSL_VER ($OSSL_NOTE) at $OSSL_FOUND — headers + libcrypto link OK" ;;
+          *) warn openssl "$OSSL_VER at $OSSL_FOUND (dev files OK) — usable but $OSSL_NOTE; cross-machine TLS comparisons should stay on 3.5.x" ;;
+        esac
+      else
+        miss "openssl-dev" "$(dev_pkg_hint)   [the build will use $OSSL_PREFIX_GUESS ($OSSL_VER) and needs its DEVELOPMENT files — the binary alone is not enough: liboqs/oqs-provider compile and link against libcrypto]"
+      fi
+      ;;
+    *)
+      warn openssl "$OSSL_VER at $OSSL_FOUND — older than 3.5: setup will SOURCE-BUILD the pinned OpenSSL 3.5.x into vendor/ (+15-30 min; needs perl). The native TLS phase matrix then still runs — it degrades only if the source build is skipped."
+      command -v perl >/dev/null 2>&1 || miss perl "$(remedy perl)   [required for the OpenSSL source build]"
+      ;;
   esac
 else
-  warn openssl "no real OpenSSL found (only LibreSSL or nothing) — setup will SOURCE-BUILD OpenSSL 3.5.x (+15-30 min). Faster: $(remedy openssl@3.5)"
+  warn openssl "no real OpenSSL found (only LibreSSL or nothing) — setup will SOURCE-BUILD the pinned 3.5.x (+15-30 min; needs perl). Faster: $(dev_pkg_hint)"
+  command -v perl >/dev/null 2>&1 || miss perl "$(remedy perl)   [required for the OpenSSL source build]"
 fi
 
 # ---- Rust: run cargo for real — this exercises rustup toolchain RESOLUTION,

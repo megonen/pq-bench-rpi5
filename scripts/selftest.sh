@@ -60,6 +60,45 @@ assert len(rows)==4 and all(r["enabled"] for r in rows)
 assert {r["implementation"] for r in rows} == {"liboqs","openssl"}
 PY
 
+echo "== correctness 1b: link targets (vendored liboqs, pinned OpenSSL) =="
+# A successful build is not evidence — the failure mode that matters is
+# building fine while linking the WRONG library (a system liboqs / another
+# OpenSSL). Verify the actual link targets of the built binary.
+if [ "$(uname -s)" = "Darwin" ]; then
+  if otool -l bench/kem_sig/bench_pq | grep -A2 LC_RPATH | grep -q "$HERE/vendor/install/lib" \
+     && otool -L bench/kem_sig/bench_pq | grep -q '@rpath/liboqs'; then
+    pass "bench_pq links the VENDORED liboqs (rpath -> vendor/install/lib)"
+  else
+    fail "bench_pq does not link the vendored liboqs — a system copy may be in use"
+  fi
+  if [ -n "${OPENSSL_PREFIX:-}" ] && otool -L bench/kem_sig/bench_pq | grep -q "$OPENSSL_PREFIX/lib/libcrypto"; then
+    pass "bench_pq links the pinned OpenSSL ($OPENSSL_PREFIX)"
+  else
+    fail "bench_pq libcrypto is not the pinned OpenSSL ($(otool -L bench/kem_sig/bench_pq | grep libcrypto | head -1))"
+  fi
+else
+  LIBOQS_RESOLVED="$(ldd bench/kem_sig/bench_pq 2>/dev/null | awk '/liboqs/{print $3}')"
+  case "$LIBOQS_RESOLVED" in
+    "$HERE"/vendor/install/lib/*) pass "bench_pq links the VENDORED liboqs ($LIBOQS_RESOLVED)" ;;
+    *) fail "bench_pq resolves liboqs to '$LIBOQS_RESOLVED' — NOT the vendored build" ;;
+  esac
+  CRYPTO_RESOLVED="$(ldd bench/kem_sig/bench_pq 2>/dev/null | awk '/libcrypto/{print $3}')"
+  if [ "${OPENSSL_PREFIX:-/usr}" = "/usr" ]; then
+    [ -n "$CRYPTO_RESOLVED" ] && pass "bench_pq libcrypto: $CRYPTO_RESOLVED (system prefix, as locked)" \
+      || fail "bench_pq has no resolvable libcrypto"
+  else
+    case "$CRYPTO_RESOLVED" in
+      "$OPENSSL_PREFIX"/*) pass "bench_pq links the pinned OpenSSL ($CRYPTO_RESOLVED)" ;;
+      *) fail "bench_pq libcrypto '$CRYPTO_RESOLVED' is not the locked prefix $OPENSSL_PREFIX" ;;
+    esac
+  fi
+fi
+case "${OQSPROVIDER_MODULE:-}" in
+  "$HERE"/vendor/*) [ -f "$OQSPROVIDER_MODULE" ] && pass "oqs-provider module is the vendored one" \
+      || fail "vendored oqs-provider module missing" ;;
+  *) fail "oqs-provider module is not under vendor/ (${OQSPROVIDER_MODULE:-unset})" ;;
+esac
+
 echo "== correctness 2: Rust harness micro-runs + cross-implementation sizes =="
 if [ "$HAVE_CARGO" = 1 ]; then
   for spec in "kem ML-KEM-768" "sig ML-DSA-65"; do

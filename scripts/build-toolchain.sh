@@ -40,11 +40,39 @@ if reason="$(toolchain_ok)"; then
   pqb_log "C toolchain present and consistent with versions.lock — skipping setup.sh (delete vendor/ or versions.lock to force)"
 else
   pqb_log "building C toolchain (${reason:-first build})"
-  ./setup/setup.sh all
+  if ! ./setup/setup.sh all; then
+    pqb_err "C toolchain build FAILED — stopping here. Fix the error above"
+    pqb_err "(commonly: missing OpenSSL DEVELOPMENT files — run 'make check')."
+    pqb_err "Nothing further was attempted, so any later error you may have"
+    pqb_err "seen previously (e.g. 'cannot find -loqs') was a symptom of this."
+    exit 1
+  fi
 fi
 
+# ---- HARD GUARD: only the vendored, pinned liboqs/oqs-provider may be used --
+# A system liboqs (e.g. a distro liboqs-devel) could build SILENTLY and every
+# measurement would then run against an unpinned library — destroying the
+# comparability the vendoring exists to guarantee. Refuse before any bench
+# binary is compiled. (bench/kem_sig/Makefile enforces the same guard, so the
+# direct `run.sh` path is protected too.)
+if ! ls "$HERE"/vendor/install/lib/liboqs.* >/dev/null 2>&1 \
+   || [ ! -f "$HERE/vendor/install/include/oqs/oqs.h" ]; then
+  pqb_err "vendored liboqs missing/incomplete under vendor/install — REFUSING to continue."
+  pqb_err "A system-installed liboqs must NOT be used: only the pinned build"
+  pqb_err "($(grep -E '^LIBOQS_REF=' "$HERE/setup/versions.env" | head -1)) produces measurements comparable"
+  pqb_err "with the published baselines, and pinned oqs-provider expects exactly its headers."
+  pqb_err "Fix: 'make build' (or ./setup/setup.sh liboqs). If you installed a distro"
+  pqb_err "liboqs-devel while debugging, remove it to avoid confusion."
+  exit 1
+fi
 # shellcheck disable=SC1090
 source "$LOCK"
+case "${OQSPROVIDER_MODULE:-}" in
+  "$HERE"/vendor/*) [ -f "$OQSPROVIDER_MODULE" ] || { pqb_err "oqs-provider module recorded in versions.lock is missing ($OQSPROVIDER_MODULE) — run 'make build'"; exit 1; } ;;
+  "") pqb_err "versions.lock records no oqs-provider module — run 'make build'"; exit 1 ;;
+  *) pqb_err "versions.lock points at a NON-VENDORED oqs-provider ($OQSPROVIDER_MODULE) — refusing: only the pinned, vendored provider may be used"; exit 1 ;;
+esac
+
 pqb_log "building bench_pq / bench_tls"
 make -C bench/kem_sig \
   LIBOQS_PREFIX="${PREFIX:-$HERE/vendor/install}" \

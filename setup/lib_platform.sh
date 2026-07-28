@@ -33,6 +33,25 @@ pqb_detect_platform() {
   export PQB_OS PQB_ARCH PQB_IS_RPI PQB_RPI_MODEL
 }
 
+# ---- Linux distro family (for package-name hints and deps installs) --------
+# echoes: debian | fedora | arch | suse | unknown
+# PQB_TEST_OS_RELEASE overrides the os-release path (test hook, used to
+# exercise the per-distro output of make check on other platforms).
+pqb_linux_family() {
+  local osr="${PQB_TEST_OS_RELEASE:-/etc/os-release}" id="" like=""
+  if [ -r "$osr" ]; then
+    id="$(. "$osr" 2>/dev/null; echo "${ID:-}")"
+    like="$(. "$osr" 2>/dev/null; echo "${ID_LIKE:-}")"
+  fi
+  case " $id $like " in
+    *debian*|*ubuntu*|*raspbian*)            echo debian ;;
+    *fedora*|*rhel*|*centos*|*rocky*|*alma*) echo fedora ;;
+    *arch*)                                  echo arch ;;
+    *suse*)                                  echo suse ;;
+    *)                                       echo unknown ;;
+  esac
+}
+
 # ---- optimization-target resolution ----------------------------------------
 # Resolve THIS host's tuned build flags (the credibility anchor: identical,
 # host-tuned flags for every candidate; the resolved values go into
@@ -243,19 +262,47 @@ pqb_install_build_deps() {
     pqb_log "installing build deps via Homebrew"
     brew install cmake ninja openssl@3.5 git python3 >/dev/null || true
   elif [ "$PQB_OS" = "linux" ]; then
-    if command -v apt-get >/dev/null 2>&1; then
-      pqb_log "installing build deps via apt"
-      local SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
-      $SUDO apt-get update -qq
-      # linux-cpupower provides the `cpupower` binary used by
-      # pqb_set_governor_performance. (Older releases shipped cpufrequtils, which
-      # was dropped in Debian 13/trixie — cpupower is the supported replacement.)
-      $SUDO apt-get install -y -qq \
-        build-essential cmake ninja-build git python3 perl \
-        libssl-dev pkg-config astyle doxygen \
-        linux-cpupower util-linux >/dev/null
-    else
-      pqb_warn "no apt-get found; install cmake/ninja/gcc/libssl-dev manually"
-    fi
+    local SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+    case "$(pqb_linux_family)" in
+      debian)
+        pqb_log "installing build deps via apt (Debian family)"
+        $SUDO apt-get update -qq
+        # linux-cpupower provides the `cpupower` binary used by
+        # pqb_set_governor_performance. (Older releases shipped cpufrequtils,
+        # dropped in Debian 13/trixie — cpupower is the replacement.)
+        # libssl-dev: the openssl BINARY is not enough — liboqs/oqs-provider
+        # need headers + a linkable libcrypto (the Fedora lesson, same idea).
+        $SUDO apt-get install -y -qq \
+          build-essential cmake ninja-build git python3 perl \
+          libssl-dev pkg-config astyle doxygen \
+          linux-cpupower util-linux >/dev/null
+        ;;
+      fedora)
+        pqb_log "installing build deps via dnf (Fedora/RHEL family)"
+        # openssl-devel is the critical one: Fedora ships the openssl binary
+        # separately from the development files, and the liboqs cmake build
+        # fails with 'Could NOT find OpenSSL (missing OPENSSL_CRYPTO_LIBRARY
+        # OPENSSL_INCLUDE_DIR)' without it.
+        $SUDO dnf install -y \
+          gcc gcc-c++ make cmake ninja-build git python3 perl \
+          openssl-devel pkgconf-pkg-config \
+          kernel-tools util-linux
+        ;;
+      arch)
+        pqb_warn "Arch detected (unverified platform) — install manually:"
+        echo "  sudo pacman -S --needed base-devel cmake ninja git python openssl perl" >&2
+        return 1
+        ;;
+      suse)
+        pqb_warn "openSUSE detected (unverified platform) — install manually:"
+        echo "  sudo zypper install gcc gcc-c++ make cmake ninja git python3 perl libopenssl-devel" >&2
+        return 1
+        ;;
+      *)
+        pqb_warn "unknown Linux family; install with your package manager:"
+        echo "  C compiler, make, cmake, ninja, git, python3, perl, OpenSSL development files (headers + libcrypto)" >&2
+        return 1
+        ;;
+    esac
   fi
 }

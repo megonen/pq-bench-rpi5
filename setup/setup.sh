@@ -77,8 +77,14 @@ build_liboqs() {
   # ML-KEM (mlkem-native) and AArch64 asm backends are enabled by default on
   # aarch64 when DIST_BUILD is OFF (compile-time CPU features); verified post-build.
   local GEN=(); command -v ninja >/dev/null 2>&1 && GEN=(-G Ninja)
+  # CMAKE_INSTALL_LIBDIR=lib pins ONE install layout on every platform:
+  # GNUInstallDirs defaults to lib64 on Red Hat family, which broke every
+  # hand-written path downstream (-L, rpath, the guards) while cmake's own
+  # find_package kept working — the root cause of the Fedora failure chain.
+  # Nothing outside this repo consumes vendor/install, so forcing lib is safe.
   cmake -S "$dest" -B "$dest/build" ${GEN[@]+"${GEN[@]}"} \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+    -DCMAKE_INSTALL_LIBDIR=lib \
     -DCMAKE_BUILD_TYPE=Release \
     -DOQS_DIST_BUILD=OFF \
     -DOQS_BUILD_ONLY_LIB=OFF \
@@ -156,6 +162,7 @@ build_oqs_provider() {
   local GEN=(); command -v ninja >/dev/null 2>&1 && GEN=(-G Ninja)
   cmake -S "$dest" -B "$dest/build" ${GEN[@]+"${GEN[@]}"} \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+    -DCMAKE_INSTALL_LIBDIR=lib \
     -DCMAKE_BUILD_TYPE=Release \
     -DOPENSSL_ROOT_DIR="$OPENSSL_PREFIX" \
     -Dliboqs_DIR="$PREFIX/lib/cmake/liboqs" \

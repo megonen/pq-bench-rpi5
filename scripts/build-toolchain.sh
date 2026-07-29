@@ -57,12 +57,17 @@ fi
 # direct `run.sh` path is protected too.)
 if ! ls "$HERE"/vendor/install/lib/liboqs.* >/dev/null 2>&1 \
    || [ ! -f "$HERE/vendor/install/include/oqs/oqs.h" ]; then
-  pqb_err "vendored liboqs missing/incomplete under vendor/install — REFUSING to continue."
-  pqb_err "A system-installed liboqs must NOT be used: only the pinned build"
-  pqb_err "($(grep -E '^LIBOQS_REF=' "$HERE/setup/versions.env" | head -1)) produces measurements comparable"
-  pqb_err "with the published baselines, and pinned oqs-provider expects exactly its headers."
-  pqb_err "Fix: 'make build' (or ./setup/setup.sh liboqs). If you installed a distro"
-  pqb_err "liboqs-devel while debugging, remove it to avoid confusion."
+  pqb_err "pinned vendored liboqs not found. Looked for BOTH of:"
+  pqb_err "  $HERE/vendor/install/include/oqs/oqs.h"
+  pqb_err "  $HERE/vendor/install/lib/liboqs.*"
+  pqb_err "Inspect the actual layout: ls $HERE/vendor/install"
+  pqb_err "- nothing there: the toolchain build failed — scroll up for the original error"
+  pqb_err "- a lib64/ directory: built before the layout was pinned"
+  pqb_err "  (-DCMAKE_INSTALL_LIBDIR=lib) — run 'make distclean && make build'"
+  pqb_err "Do NOT install a distro liboqs to work around this: linking a system"
+  pqb_err "liboqs is refused — unpinned versions are not comparable with the"
+  pqb_err "published baselines, and the pinned oqs-provider expects exactly the"
+  pqb_err "pinned liboqs' headers."
   exit 1
 fi
 # shellcheck disable=SC1090

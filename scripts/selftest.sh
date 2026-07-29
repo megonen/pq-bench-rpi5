@@ -69,7 +69,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
      && otool -L bench/kem_sig/bench_pq | grep -q '@rpath/liboqs'; then
     pass "bench_pq links the VENDORED liboqs (rpath -> vendor/install/lib)"
   else
-    fail "bench_pq does not link the vendored liboqs — a system copy may be in use"
+    fail "bench_pq rpath does not include $HERE/vendor/install/lib (pinned layout) — rebuild with 'make build'; if it persists, a wrong liboqs may be linked"
   fi
   if [ -n "${OPENSSL_PREFIX:-}" ] && otool -L bench/kem_sig/bench_pq | grep -q "$OPENSSL_PREFIX/lib/libcrypto"; then
     pass "bench_pq links the pinned OpenSSL ($OPENSSL_PREFIX)"

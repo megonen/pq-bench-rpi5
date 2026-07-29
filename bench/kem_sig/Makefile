@@ -29,10 +29,17 @@ LDLIBS  := -loqs -lcrypto -lm
 # the pinned oqs-provider expects exactly the pinned liboqs' headers.
 liboqs-guard:
 	@if ! test -f "$(LIBOQS_PREFIX)/include/oqs/oqs.h" || ! ls "$(LIBOQS_PREFIX)"/lib/liboqs.* >/dev/null 2>&1; then \
-	  echo "ERROR: vendored liboqs not found under $(LIBOQS_PREFIX)."; \
-	  echo "Refusing to link: a system liboqs must NOT be used (unpinned versions"; \
-	  echo "are not comparable with the published baselines). Run 'make build' or"; \
-	  echo "./setup/setup.sh liboqs first."; \
+	  echo "ERROR: pinned vendored liboqs not found. Looked for BOTH of:"; \
+	  echo "  $(LIBOQS_PREFIX)/include/oqs/oqs.h"; \
+	  echo "  $(LIBOQS_PREFIX)/lib/liboqs.*"; \
+	  echo "Inspect what is actually there with: ls $(LIBOQS_PREFIX)"; \
+	  echo "- Nothing there: the toolchain build did not run or failed -- check the"; \
+	  echo "  output of 'make build' / ./setup/setup.sh for the original error."; \
+	  echo "- A lib64/ directory: the toolchain was built before the install layout"; \
+	  echo "  was pinned (-DCMAKE_INSTALL_LIBDIR=lib) -- 'make distclean && make build'."; \
+	  echo "Either way, do NOT install a distro liboqs to work around this: linking a"; \
+	  echo "system liboqs is refused because unpinned versions are not comparable with"; \
+	  echo "the published baselines."; \
 	  exit 1; \
 	fi
 

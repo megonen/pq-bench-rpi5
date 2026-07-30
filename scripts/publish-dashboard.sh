@@ -9,7 +9,7 @@
 # (index.html, app.js, style.css, README.md, data/merged.json) — no harness
 # code, no results/. Each publish is a fresh single commit (no history bloat);
 # the commit message records which source commit it was generated from. GitHub
-# Pages serves it at https://megonen.github.io/pq-bench-rpi5/ — the app's data
+# Pages serves it at https://megonen.github.io/pqc-bench/ — the app's data
 # fetch is RELATIVE ("data/merged.json"), which is what makes the subfolder
 # Pages URL work; keep it that way.
 # =============================================================================
@@ -48,4 +48,4 @@ git -C "$WT" -c user.name=megonen -c user.email=megonen@users.noreply.github.com
   commit -q -m "publish dashboard from $SRC_BRANCH @ $SRC_COMMIT"
 git -C "$WT" push -f origin gh-pages
 echo "published gh-pages from $SRC_BRANCH @ $SRC_COMMIT"
-echo "URL: https://megonen.github.io/pq-bench-rpi5/ (allow ~1 min for Pages deploy)"
+echo "URL: https://megonen.github.io/pqc-bench/ (allow ~1 min for Pages deploy)"

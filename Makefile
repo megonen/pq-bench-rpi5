@@ -12,10 +12,10 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help check deps build test smoke run merge dashboard clean distclean
+.PHONY: help check deps build test test-fedora smoke run merge dashboard clean distclean
 
 help: ## list targets
-	@grep -E '^[a-z]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-10s %s\n", $$1, $$2}'
+	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-10s %s\n", $$1, $$2}'
 
 check: ## verify the environment (read-only; prints per-platform install hints)
 	@scripts/check-env.sh
@@ -28,6 +28,9 @@ build: check ## C toolchain (liboqs/OpenSSL/oqs-provider) + bench binaries + Rus
 
 test: build ## fast verification gate (~1-2 min): correctness blocks, hygiene warns
 	@scripts/selftest.sh
+
+test-fedora: ## check/build/test in a Fedora container (Red Hat paths/packages/degradation; SMOKE=1 adds a smoke run; not a benchmark)
+	@scripts/test-fedora.sh
 
 smoke: build ## all-four-groups smoke benchmark (1 rep, 50 handshakes/cell)
 	@scripts/bench-run.sh --smoke

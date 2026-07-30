@@ -200,6 +200,11 @@ make test      # ~1-2 min verification gate (21 checks): harness correctness
                # agreement, schema round-trip; repo-hygiene checks warn
                # without blocking
 make smoke     # all-four-groups pipeline check (1 rep, 50 handshakes/cell)
+make test-fedora # check+build+test in a Fedora container (podman/docker;
+               # SMOKE=1 adds a smoke run) — covers the Red Hat platform
+               # differences Mac+Pi testing structurally cannot catch (dnf
+               # package split, lib64 defaults, x86 /proc/cpuinfo shape);
+               # exercises degradation paths, produces no measurement data
 make run       # the full benchmark (~30 min Pi 5 / ~36 min M3)
 make merge     # rebuild dashboard/data/merged.json from the published manifest
 make dashboard # serve the dashboard over HTTP (view only; never mutates data)

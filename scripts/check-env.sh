@@ -155,8 +155,10 @@ fi
 if [ "$PQB_OS" = "linux" ]; then
   command -v taskset >/dev/null 2>&1 && ok taskset "core pinning available" \
     || warn taskset "no taskset — runs will be unpinned (not baseline-grade). $(remedy util-linux)"
+  CPUPOWER_PKG=linux-cpupower
+  [ "$(pqb_linux_family)" = fedora ] && CPUPOWER_PKG=kernel-tools
   command -v cpupower >/dev/null 2>&1 && ok cpupower "governor control available" \
-    || warn cpupower "no cpupower — performance governor cannot be set. $(remedy linux-cpupower)"
+    || warn cpupower "no cpupower — performance governor cannot be set. $(remedy "$CPUPOWER_PKG")"
   if [ "$PQB_IS_RPI" = 1 ]; then
     command -v vcgencmd >/dev/null 2>&1 && ok vcgencmd "thermal/throttle telemetry available" \
       || warn vcgencmd "no vcgencmd — thermal trace and throttle detection unavailable on this Pi"

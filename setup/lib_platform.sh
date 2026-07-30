@@ -302,7 +302,7 @@ pqb_install_build_deps() {
         # OPENSSL_INCLUDE_DIR)' without it.
         $SUDO dnf install -y \
           gcc gcc-c++ make cmake ninja-build git python3 perl \
-          openssl-devel pkgconf-pkg-config \
+          openssl openssl-devel pkgconf-pkg-config \
           kernel-tools util-linux
         ;;
       arch)

@@ -1,5 +1,5 @@
 # =============================================================================
-# pq-bench-rpi5 candidate configuration
+# pqc-bench candidate configuration
 #
 # This file is the single place users edit to extend the benchmark. The harness
 # reads it with a dependency-free YAML subset parser (bench/lib/miniyaml.py), so

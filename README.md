@@ -1,7 +1,8 @@
-# pq-bench-rpi5
+# pqc-bench
 
-A reproducible, general-purpose **post-quantum cryptography benchmark** whose
-baseline target is the **Raspberry Pi 5** (Broadcom BCM2712, Cortex-A76,
+A reproducible, general-purpose **post-quantum cryptography benchmark**
+(formerly `pq-bench-rpi5`) whose baseline **reference platform** is the
+**Raspberry Pi 5** (Broadcom BCM2712, Cortex-A76,
 aarch64). Anyone can run it on their own Pi 5 and the results aggregate and
 compare apples-to-apples.
 
@@ -128,7 +129,7 @@ measured handshake latency is the protocol overhead.
 ## Project layout
 
 ```
-pq-bench-rpi5/
+pqc-bench/
   setup/         build + pin liboqs, OpenSSL 3.5+, oqs-provider (versions.env / versions.lock)
   bench/kem_sig/ bench_pq.c     primitive KEM/sig harness (liboqs + OpenSSL EVP baselines)
   bench/tls/     bench_tls.c    in-process TLS 1.3 handshake harness (OpenSSL API;
@@ -183,7 +184,7 @@ The setup and run steps live in the **Makefile**, so they can't drift from
 reality the way prose does; `make help` lists everything. The flow:
 
 ```bash
-git clone <this repo> && cd pq-bench-rpi5
+git clone <this repo> && cd pqc-bench
 make check     # read-only: verifies the environment — including that the
                # OpenSSL the build will use has its DEVELOPMENT files
                # (compile-and-link probe) — and prints per-platform install
@@ -271,7 +272,7 @@ Docker is for reproducibly **building** the pinned C toolchain (liboqs /
 OpenSSL / oqs-provider), not for running the benchmark:
 
 ```bash
-docker build -t pq-bench-rpi5 .   # builds + pins the C toolchain inside the image
+docker build -t pqc-bench .   # builds + pins the C toolchain inside the image
 ```
 
 > **Coverage note:** the image covers the **C toolchain only** — it installs no
@@ -564,7 +565,7 @@ For your numbers to count as baseline-grade, the run must satisfy the
   extra algorithms simply add columns.)
 
 ```bash
-git clone <this repo> && cd pq-bench-rpi5
+git clone <this repo> && cd pqc-bench
 make check && make build && make test
 make run     # sudo (with the required rustup env) is handled for you
 ```

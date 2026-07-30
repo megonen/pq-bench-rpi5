@@ -364,7 +364,7 @@ d=json.load(open(sys.argv[1]))
 g=d["is_baseline_grade"]
 print(f"  results: {sys.argv[1]}")
 print(f"  host: {d['host']['cpu_brand']} ({d['host']['os_pretty']})")
-print(f"  baseline-grade (RPi5): {g}")
+print(f"  baseline-grade (reference platform: RPi5): {g}")
 if not g:
     for r in d['baseline_grade_reasons']:
         print(f"     - {r}")

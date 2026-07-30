@@ -1,5 +1,5 @@
 # =============================================================================
-# pq-bench-rpi5 — executable documentation. `make help` lists everything.
+# pqc-bench — executable documentation. `make help` lists everything.
 #
 # Design rules (docs/history behind them: the cold-read round):
 #   * `check` is READ-ONLY; `deps` is the only target that installs anything.

@@ -137,22 +137,39 @@ pqb_resolve_hostname() {
 # ---- CPU governor ----------------------------------------------------------
 # Returns 0 if it set 'performance', 1 if unavailable. Prints the governor it
 # left the system in on stdout.
+#
+# This is the ONLY privileged operation in the whole run (the sysfs governor
+# files are root-writable only), so it is the only step allowed to escalate.
+# The measurement itself runs as the invoking user — running everything under
+# sudo bit us three times (root-owned results/.work-* dirs, cargo-as-root,
+# root-owned bench/*/target artifacts). bench-run.sh caches credentials up
+# front (sudo -v) and sets PQB_GOV_SUDO=1; writes then use non-interactive
+# `sudo -n`, so a run can never stall on a mid-run password prompt.
 pqb_set_governor_performance() {
   if [ "$PQB_OS" = "linux" ] && [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; then
     local ok=1 g
     for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-      [ -w "$g" ] || { ok=0; continue; }
-      echo performance > "$g" 2>/dev/null || ok=0
+      if [ -w "$g" ]; then
+        echo performance > "$g" 2>/dev/null || ok=0
+      elif [ "${PQB_GOV_SUDO:-0}" = 1 ] && command -v sudo >/dev/null 2>&1; then
+        echo performance | sudo -n tee "$g" >/dev/null 2>&1 || ok=0
+      else
+        ok=0
+      fi
     done
     if [ "$ok" = 1 ]; then
       cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null
       return 0
     fi
-    # try cpupower as a fallback (may need sudo)
-    if command -v cpupower >/dev/null 2>&1 && cpupower frequency-set -g performance >/dev/null 2>&1; then
-      echo performance; return 0
+    # cpupower fallback, same single-step escalation rules
+    if command -v cpupower >/dev/null 2>&1; then
+      if cpupower frequency-set -g performance >/dev/null 2>&1 \
+         || { [ "${PQB_GOV_SUDO:-0}" = 1 ] && command -v sudo >/dev/null 2>&1 \
+              && sudo -n cpupower frequency-set -g performance >/dev/null 2>&1; }; then
+        echo performance; return 0
+      fi
     fi
-    pqb_warn "could not set governor to performance (need root? try: sudo ./run.sh)"
+    pqb_warn "could not set governor to performance (use 'make run' so this one step can escalate, or accept the non-baseline demerit)"
     cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown"
     return 1
   fi

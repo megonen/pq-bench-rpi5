@@ -210,12 +210,15 @@ make merge     # rebuild dashboard/data/merged.json from the published manifest
 make dashboard # serve the dashboard over HTTP (view only; never mutates data)
 ```
 
-`make run`/`make smoke` handle privilege correctly per platform: on Linux they
-use the full `sudo env "PATH=…" "RUSTUP_HOME=…" "CARGO_HOME=…"` form (plain
-`sudo ./run.sh` silently loses both Rust groups — rustup can't resolve a
-toolchain under root's HOME; found the hard way on a Pi). On macOS no sudo is
-used at all. `NOSUDO=1 make run` skips sudo and honestly records the governor
-demerit. `build`'s skip logic uses live checks (artifacts + `openssl version`
+`make run`/`make smoke` handle privilege correctly per platform. The run needs
+root for exactly one step — writing `performance` into the sysfs CPU-governor
+files — so on Linux they cache sudo credentials once up front (`sudo -v`) and
+only that step escalates (`sudo -n`); the measurement itself, including the
+cargo builds and all result files, runs as your user. (The old whole-run sudo
+design left root-owned `results/.work-*` and `target/` artifacts behind and
+needed a fragile `sudo env RUSTUP_HOME=…` workaround for cargo — all gone.)
+On macOS no escalation of any kind is used. `NOSUDO=1 make run` skips the
+sudo attempt and honestly records the governor demerit. `build`'s skip logic uses live checks (artifacts + `openssl version`
 against the lock), never stamp files — upgrading OpenSSL triggers a rebuild
 instead of being silently masked.
 

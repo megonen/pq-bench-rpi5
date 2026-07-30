@@ -49,8 +49,8 @@ per operation** to your Pi's speed, so results stay comparable across machines.
   `rustcrypto` primitives (`bench/rust`) and the `rustls-awslc` TLS matrix
   (`bench/rust-tls`). The latter compiles the AWS-LC C library on first build
   (needs `cmake`, which `setup.sh deps` installs; verified working on a Pi 5).
-  **Build both harnesses as your normal user before the sudo run** — otherwise
-  cargo builds them as root and leaves root-owned `target/` directories:
+  Build both harnesses as your normal user (the run also does this
+  automatically — it runs cargo as you, never as root):
 
   ```sh
   (cd bench/rust && cargo build --release --locked)
@@ -86,7 +86,7 @@ make test    # ~1-2 min verification gate (21 checks, incl. ldd-verifying the
 The build takes 5–15 min (liboqs dominates; the first Rust-TLS build compiles
 AWS-LC, several more minutes once). Run inside `tmux` so it survives an SSH
 disconnect. `make build` refuses to run cargo as root — build as your normal
-user; only the run itself uses sudo.
+user; the run also stays your user, only the governor step escalates.
 
 ## Step 3 — Run
 
@@ -94,14 +94,14 @@ user; only the run itself uses sudo.
 make run
 ```
 
-On Linux this expands to
-`sudo env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" ./run.sh` —
-`sudo` is needed to set the performance governor, pin cores, and read the
-temperature, and **all three env vars matter** (verified the hard way on a
-Pi): `PATH` alone is NOT enough — root finds `cargo`, but under root's HOME
-rustup cannot resolve a toolchain and both Rust measurement groups silently
-skip. The Makefile bakes the correct form in so nobody has to remember it;
-`NOSUDO=1 make run` skips sudo (governor demerit recorded honestly).
+Root is needed for exactly one step: writing `performance` into the sysfs
+CPU-governor files. `make run` asks for your sudo password once, up front
+(`sudo -v`), and only the governor write escalates (`sudo -n`) — the
+measurement itself, the in-run cargo builds and every result file stay owned
+by your user. (Core pinning via `taskset` and the `vcgencmd` thermal trace
+need no root — vcgencmd only needs the `video` group, which the default Pi
+user has.) `NOSUDO=1 make run` skips the sudo attempt; the run completes and
+the governor demerit is recorded honestly.
 
 A full run covers **all four measurement groups** (liboqs primitives,
 RustCrypto primitives, aws-lc-rs pricing rows, and the three-stack TLS phase

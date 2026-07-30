@@ -17,7 +17,11 @@
 #   ./run.sh --kemsig-only   # skip the TLS layer
 #   ./run.sh --tls-only      # only the TLS layer
 #   ./run.sh --iters N --warmup N --reps N   # override measurement knobs
-#   sudo ./run.sh            # needed on Linux to set the governor
+#
+# Prefer `make run` / `make smoke`: on Linux they cache sudo credentials once
+# so the CPU-governor step (the ONLY privileged operation) can escalate via
+# `sudo -n`, while the measurement itself runs as your user. NOSUDO=1 (or
+# declining sudo) still completes the run with the governor demerit recorded.
 # =============================================================================
 set -euo pipefail
 
@@ -113,7 +117,7 @@ GOV_BEFORE="$(pqb_get_governor)"
 GOV_AFTER="$(pqb_set_governor_performance || true)"
 GOV_REQUESTED="performance"
 if [ "$GOV_AFTER" != "performance" ]; then
-  add_warn "governor is '$GOV_AFTER', not 'performance' (need root on Linux, or unsupported on macOS)"
+  add_warn "governor is '$GOV_AFTER', not 'performance' (on Linux run via 'make run' so the governor step can escalate; no governor control on macOS)"
 fi
 
 # ---- core pinning ----------------------------------------------------------

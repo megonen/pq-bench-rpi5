@@ -16,6 +16,14 @@ rasberrypi5-20260720T143239Z.json
 # Consolidated Mac (Apple M3) cross-platform run (apple-m3 / -mcpu=native,
 # OpenSSL 3.5.7; NOT baseline-grade by design — dashboard hides it by default):
 mehmetmac-20260719T224937Z.json
+# Apple M4 Pro cross-platform run (apple-m4-pro / -mcpu=native, OpenSSL 3.5.7,
+# macOS 26.6; full four-group + three-stack coverage; NOT baseline-grade):
+Mac-20260730T134951Z.json
+# Fedora 44 x86_64 run (Intel Core Ultra 9 285HX, generic-fallback flags,
+# system OpenSSL 3.5.7, governor=performance + pinned via the narrowed-sudo
+# path; NOT baseline-grade: non-Pi host, untuned flags. First x86 datapoint —
+# also validates the x86 cpu-features path in production):
+fedora-20260730T120637Z.json
 #
 # ---- retired (schema 1.0.0 generation; files kept in the repo as history) ----
 # NB: rasberrypi5-20260614T205226Z.json additionally serves as the

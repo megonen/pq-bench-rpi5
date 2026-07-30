@@ -195,8 +195,11 @@ function runTag(r) {
   const b = ((MERGED.runs.find(x=>x.run_id===r.run_id)||r).host||{}).cpu_brand ||
             r.cpu_brand || r.hostname || "?";
   if (/raspberry/i.test(b)) return "Pi 5";
-  const m = b.match(/Apple (M\d+\w*)/i);
-  return m ? m[1] : b.split(" ").slice(0,2).join(" ");
+  const m = b.match(/Apple (M\d+(?: \w+)?)/i);
+  if (m) return m[1];
+  const clean = b.replace(/\((R|TM)\)/gi, "");
+  const x86 = clean.match(/(Ultra \d+|i\d-\w+|Ryzen \d( \w+)?)/i);
+  return x86 ? x86[1] : clean.split(/\s+/).slice(0,2).join(" ");
 }
 function runsOrdered() {  // baseline-grade first
   return MERGED.runs.slice().sort((a,b)=>(b.is_baseline_grade?1:0)-(a.is_baseline_grade?1:0));

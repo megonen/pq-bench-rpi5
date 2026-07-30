@@ -26,6 +26,9 @@ source "$HERE/lib_platform.sh"
 source "$HERE/versions.env"
 
 pqb_detect_platform
+# set -e deaths must never be silent (see run.sh)
+set -E  # errtrace: without it the ERR trap does not fire inside functions
+trap 'pqb_err "setup.sh aborted at line $LINENO while running: $BASH_COMMAND"' ERR
 
 VENDOR="$ROOT/vendor"
 SRC="$VENDOR/src"
@@ -33,6 +36,26 @@ PREFIX="$VENDOR/install"
 mkdir -p "$SRC" "$PREFIX"
 
 JOBS="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+LOGDIR="$VENDOR/logs"
+mkdir -p "$LOGDIR"
+
+# run_logged <name> <cmd...> — build steps must never fail silently. The old
+# `cmake --build ... >/dev/null` pattern discarded compiler errors entirely
+# when the generator was Ninja (unlike make, ninja merges the compiler's
+# stderr into its own STDOUT — so >/dev/null swallowed the actual error and
+# the run died with nothing but an exit code). Full output goes to a log
+# file; on failure the tail is replayed so the real error is on screen.
+run_logged() {
+  local name="$1"; shift
+  local log="$LOGDIR/$name.log" rc=0
+  "$@" >"$log" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    pqb_err "step '$name' FAILED (exit $rc): $*"
+    pqb_err "last 30 lines of $log:"
+    tail -30 "$log" >&2
+    return $rc
+  fi
+}
 
 # ---- decide the real optimization flags for THIS host ----------------------
 # Detection lives in lib_platform.sh (pqb_choose_cflags): cortex-a76 on Linux
@@ -82,7 +105,7 @@ build_liboqs() {
   # hand-written path downstream (-L, rpath, the guards) while cmake's own
   # find_package kept working — the root cause of the Fedora failure chain.
   # Nothing outside this repo consumes vendor/install, so forcing lib is safe.
-  cmake -S "$dest" -B "$dest/build" ${GEN[@]+"${GEN[@]}"} \
+  run_logged liboqs-configure cmake -S "$dest" -B "$dest/build" ${GEN[@]+"${GEN[@]}"} \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DCMAKE_INSTALL_LIBDIR=lib \
     -DCMAKE_BUILD_TYPE=Release \
@@ -90,9 +113,10 @@ build_liboqs() {
     -DOQS_BUILD_ONLY_LIB=OFF \
     -DBUILD_SHARED_LIBS=ON \
     -DOPENSSL_ROOT_DIR="$OPENSSL_PREFIX" \
-    -DCMAKE_C_FLAGS="$BENCH_CFLAGS" >/dev/null
-  cmake --build "$dest/build" --parallel "$JOBS" >/dev/null
-  cmake --install "$dest/build" >/dev/null
+    -DCMAKE_INSTALL_RPATH="$PREFIX/lib" \
+    -DCMAKE_C_FLAGS="$BENCH_CFLAGS"
+  run_logged liboqs-build cmake --build "$dest/build" --parallel "$JOBS"
+  run_logged liboqs-install cmake --install "$dest/build"
 
   # Prove the optimized backend: capture the aarch64/native defines from the
   # generated build config so versions.lock can show what was actually compiled.
@@ -115,6 +139,25 @@ locate_or_build_openssl() {
   # records the deviation via OPENSSL_COMMIT (stamped into every results JSON).
   local want_major=3 want_minor=5
   if [ "${1:-}" != "force" ] && [ "${BUILD_OPENSSL:-0}" != 1 ]; then
+    # Reuse an already-vendored source build first: the phases run as separate
+    # processes, and the candidate walk below only looks at keg/system paths,
+    # so without this every phase would source-build OpenSSL again from
+    # scratch. Probing by EXECUTION is deliberate — it proves the binary
+    # resolves its own libssl/libcrypto (the rpath baked in below); an
+    # rpath-less build from before that fix fails this probe and is rebuilt.
+    # OPENSSL_COMMIT stays unset here: write_lock seeds it from the existing
+    # lock, which has the real commit.
+    if [ -x "$PREFIX/bin/openssl" ]; then
+      local vv
+      vv="$("$PREFIX/bin/openssl" version 2>/dev/null | awk '{print $2}')"
+      case "$vv" in
+        "$want_major.$want_minor".*)
+          OPENSSL_BIN="$PREFIX/bin/openssl"
+          OPENSSL_PREFIX="$PREFIX"
+          pqb_log "reusing vendored OpenSSL $vv at $PREFIX"
+          return 0 ;;
+      esac
+    fi
     local pass cand
     for pass in pinned fallback; do
       for cand in /opt/homebrew/opt/openssl@3.5/bin/openssl \
@@ -146,8 +189,21 @@ locate_or_build_openssl() {
   pqb_log "building OpenSSL $OPENSSL_REF from source"
   local dest="$SRC/openssl" commit
   commit="$(git_pin "$OPENSSL_REPO" "$OPENSSL_REF" "$dest")"
-  ( cd "$dest" && ./Configure --prefix="$PREFIX" --openssldir="$PREFIX/ssl" shared \
-      && make -j"$JOBS" >/dev/null && make install_sw >/dev/null )
+  # --libdir=lib: OpenSSL's own Configure defaults to lib64 on Red Hat-family
+  # x86_64 — same one-layout pin as CMAKE_INSTALL_LIBDIR=lib for the cmake
+  # projects (downstream -L/rpath/guards all assume vendor/install/lib).
+  # -Wl,-rpath: without it the installed bin/openssl resolves libssl/libcrypto
+  # from the SYSTEM path (on Fedora that's the older 3.2.x — symbol-version
+  # errors on every invocation), because the source build only happens on
+  # hosts whose system OpenSSL is older than the pin.
+  ( cd "$dest" \
+      && run_logged openssl-configure ./Configure --prefix="$PREFIX" --openssldir="$PREFIX/ssl" \
+           --libdir=lib shared "-Wl,-rpath,$PREFIX/lib" \
+      && run_logged openssl-build make -j"$JOBS" \
+      && run_logged openssl-install make install_sw \
+      && run_logged openssl-install-ssldirs make install_ssldirs )
+      # install_ssldirs: install_sw alone ships no openssl.cnf; every `openssl
+      # req` (PKI generation) then fails with "Can't open .../ssl/openssl.cnf"
   OPENSSL_BIN="$PREFIX/bin/openssl"
   OPENSSL_PREFIX="$PREFIX"
   OPENSSL_COMMIT="$commit"
@@ -160,15 +216,16 @@ build_oqs_provider() {
   commit="$(git_pin "$OQSPROVIDER_REPO" "$OQSPROVIDER_REF" "$dest")"
   pqb_log "building oqs-provider ($OQSPROVIDER_REF @ ${commit:0:12})"
   local GEN=(); command -v ninja >/dev/null 2>&1 && GEN=(-G Ninja)
-  cmake -S "$dest" -B "$dest/build" ${GEN[@]+"${GEN[@]}"} \
+  run_logged provider-configure cmake -S "$dest" -B "$dest/build" ${GEN[@]+"${GEN[@]}"} \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DCMAKE_INSTALL_LIBDIR=lib \
     -DCMAKE_BUILD_TYPE=Release \
     -DOPENSSL_ROOT_DIR="$OPENSSL_PREFIX" \
     -Dliboqs_DIR="$PREFIX/lib/cmake/liboqs" \
-    -DCMAKE_C_FLAGS="${BENCH_CFLAGS:-$TARGET_CFLAGS_FALLBACK}" >/dev/null
-  cmake --build "$dest/build" --parallel "$JOBS" >/dev/null
-  cmake --install "$dest/build" >/dev/null 2>&1 || true
+    -DCMAKE_INSTALL_RPATH="$PREFIX/lib" \
+    -DCMAKE_C_FLAGS="${BENCH_CFLAGS:-$TARGET_CFLAGS_FALLBACK}"
+  run_logged provider-build cmake --build "$dest/build" --parallel "$JOBS"
+  run_logged provider-install cmake --install "$dest/build" || true
   # Provider .so lands under .../lib/ossl-modules or .../oqsprovider
   OQSPROVIDER_MODULE="$(find "$PREFIX" "$dest/build" -name 'oqsprovider.*' \( -name '*.so' -o -name '*.dylib' \) 2>/dev/null | head -1)"
   OQSPROVIDER_COMMIT="$commit"

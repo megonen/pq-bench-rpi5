@@ -233,14 +233,31 @@ pqb_throttled_active() {
 pqb_cpu_features_json() {
   local neon=false sha2=false sha3=false sha512=false aes=false pmull=false src="unknown"
   if [ "$PQB_OS" = "linux" ] && [ -r /proc/cpuinfo ]; then
-    src="/proc/cpuinfo"
-    local feats; feats="$(grep -m1 -i '^Features' /proc/cpuinfo | tr 'A-Z' 'a-z')"
-    case "$feats" in *" asimd"*|*"neon"*) neon=true;; esac
-    case "$feats" in *" sha2"*) sha2=true;; esac
-    case "$feats" in *" sha3"*) sha3=true;; esac
-    case "$feats" in *" sha512"*) sha512=true;; esac
-    case "$feats" in *" aes"*) aes=true;; esac
-    case "$feats" in *" pmull"*) pmull=true;; esac
+    # ARM /proc/cpuinfo has a 'Features' line; x86 has 'flags' instead. The
+    # grep MUST NOT propagate failure: under run.sh's `set -e -o pipefail` a
+    # missing 'Features' line (any x86 box) previously killed the whole run
+    # with no diagnostic, right after the thermal sampler started.
+    local feats
+    feats="$(grep -m1 -i '^Features' /proc/cpuinfo 2>/dev/null | tr 'A-Z' 'a-z' || true)"
+    if [ -n "$feats" ]; then
+      src="/proc/cpuinfo (Features)"
+      case "$feats" in *" asimd"*|*"neon"*) neon=true;; esac
+      case "$feats" in *" sha2"*) sha2=true;; esac
+      case "$feats" in *" sha3"*) sha3=true;; esac
+      case "$feats" in *" sha512"*) sha512=true;; esac
+      case "$feats" in *" aes"*) aes=true;; esac
+      case "$feats" in *" pmull"*) pmull=true;; esac
+    else
+      # x86: map the 1:1 equivalents from the 'flags' line (aes -> AES-NI,
+      # sha_ni -> SHA-2 instructions, pclmulqdq -> carry-less multiply).
+      # neon/sha3/sha512 stay false: they are ARM-specific extensions.
+      src="/proc/cpuinfo (flags, x86)"
+      local flags
+      flags="$(grep -m1 -i '^flags' /proc/cpuinfo 2>/dev/null | tr 'A-Z' 'a-z' || true)"
+      case "$flags" in *" aes"*) aes=true;; esac
+      case "$flags" in *" sha_ni"*) sha2=true;; esac
+      case "$flags" in *" pclmulqdq"*) pmull=true;; esac
+    fi
   elif [ "$PQB_OS" = "macos" ]; then
     src="sysctl"
     neon=true   # all Apple Silicon has NEON/ASIMD

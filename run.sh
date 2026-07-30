@@ -32,6 +32,13 @@ LOCK="$ROOT/setup/versions.lock"
 
 pqb_detect_platform
 
+# `set -e` deaths must never be silent: report the failing command and line.
+# (A generic-x86 run previously exited 1 with no output at all when a
+# platform probe failed mid-run — this trap makes that class of failure
+# diagnosable wherever it happens next.)
+set -E  # errtrace: without it the ERR trap does not fire inside functions
+trap 'pqb_err "run.sh aborted at line $LINENO while running: $BASH_COMMAND"' ERR
+
 # Rust flag parity with the C side (recorded in the Rust provenance blocks):
 # the same host-tuning the C builds got, expressed as target-cpu.
 case "${CFLAGS_TARGET:-}" in
@@ -125,7 +132,10 @@ SAMPLER_PID=$!
 disown "$SAMPLER_PID" 2>/dev/null || true   # suppress job-control "Terminated" noise on kill
 # shellcheck disable=SC2064
 trap "kill $SAMPLER_PID 2>/dev/null || true" EXIT
-pqb_sample_thermal >> "$THERMAL" 2>/dev/null   # one immediate sample
+pqb_sample_thermal >> "$THERMAL" 2>/dev/null || true   # one immediate sample
+# (|| true: on machines with no thermal telemetry the sampler records empty
+# fields; a sampler hiccup must never abort a measurement run — temperature
+# is then honestly reported unavailable, as on macOS)
 
 # ---- CPU features ----------------------------------------------------------
 pqb_cpu_features_json > "$FEATURES"

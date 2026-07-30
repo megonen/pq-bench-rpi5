@@ -21,6 +21,9 @@ LOCK="$ROOT/setup/versions.lock"
 # shellcheck disable=SC1090
 [ -f "$LOCK" ] && source "$LOCK" || true
 pqb_detect_platform
+# set -e deaths must never be silent (see run.sh)
+set -E  # errtrace: without it the ERR trap does not fire inside functions
+trap 'pqb_err "run_tls.sh aborted at line $LINENO while running: $BASH_COMMAND"' ERR
 
 OUT=""; CONNS=1000; WARMUP=20
 while [ $# -gt 0 ]; do

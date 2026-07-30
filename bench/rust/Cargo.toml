@@ -1,0 +1,29 @@
+[package]
+name = "pqb-rust"
+version = "0.1.0"
+edition = "2021"
+description = "pq-bench-rpi5 pure-Rust (RustCrypto) KEM/signature harness — same methodology as bench/kem_sig/bench_pq.c, emitting the same schema-2.0.0 JSONL rows with implementation:\"rustcrypto\""
+publish = false
+
+[dependencies]
+# The three measured crates — EXACT pins (documented in setup/versions.env).
+# Pure Rust; pre-1.0 and unaudited (fine for benchmarking, stated in README).
+ml-kem = "=0.3.2"
+ml-dsa = "=0.1.1"
+slh-dsa = "=0.2.0-rc.5"
+# System RNG (getrandom-backed), analogous to liboqs' system OQS_randombytes.
+# These match the rand_core/getrandom generation the three crates use.
+rand_core = "0.10"
+getrandom = { version = "0.4", features = ["sys_rng"] }
+# Only for clock_gettime(CLOCK_MONOTONIC) — the exact clock bench_pq.c uses.
+# (std::time::Instant uses a different timebase on macOS.)
+libc = "0.2"
+x25519-dalek = { version = "=3.0.0", features = ["static_secrets"] }
+ed25519-dalek = { version = "=3.0.0", features = ["rand_core"] }
+
+[profile.release]
+# Parity with the C harness build (-O3, one translation unit). LTO stays off:
+# the C side does not LTO either. All of this is recorded in the provenance.
+opt-level = 3
+codegen-units = 1
+lto = false

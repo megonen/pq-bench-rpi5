@@ -6,7 +6,7 @@
 # installs no Rust, so the RustCrypto (bench/rust) and rustls (bench/rust-tls)
 # measurement groups are not built here, and the image has not been re-verified
 # since those groups were added. The verified setup paths are the bare-metal
-# ones in README.md / RUNNING-ON-YOUR-RPI5.md.
+# ones in README.md.
 #
 # This image is for BUILDING ONLY — it is NOT for running the benchmark.
 #

@@ -223,11 +223,24 @@ sudo attempt and honestly records the governor demerit. `build`'s skip logic use
 against the lock), never stamp files — upgrading OpenSSL triggers a rebuild
 instead of being silently masked.
 
-### On a Raspberry Pi 5 (the real measurement target)
+### On a Raspberry Pi 5 (the baseline reference platform)
 
-Follow **[RUNNING-ON-YOUR-RPI5.md](RUNNING-ON-YOUR-RPI5.md)** for the
-Pi-specific context (cooling, PSU, governor, baseline-grade); the commands are
-the same targets: `make check && make build && make test && make run`.
+Same targets: `make check && make build && make test && make run`. Pi-specific
+notes:
+
+- **Active cooling** matters: a throttled run is stamped non-baseline (the
+  thermal trace and throttle bits are recorded throughout).
+- **Raspberry Pi OS / Debian 13 (trixie) or newer** ships system OpenSSL on
+  the pinned 3.5.x line with native PQC (ML-KEM/ML-DSA groups verified on a
+  Pi 5 running 3.5.6), so no OpenSSL source build is needed. Older OS: setup
+  source-builds the pinned 3.5.x automatically (+15-30 min). Quick check:
+  `openssl version` and `openssl list -tls-groups | tr ':' '\n' | grep -i mlkem`.
+- **Rust via rustup** (stable) enables the two Rust measurement groups; if
+  cargo is absent both are skipped with the reason recorded. The first
+  `bench/rust-tls` build compiles the AWS-LC C library (several minutes, once).
+- Run inside `tmux` so an SSH disconnect doesn't kill the run. A full run is
+  ~29 min on a Pi 5 (auto-calibration targets a fixed per-op budget, so the
+  Pi is not slower end-to-end than an M3).
 
 **On `sudo`:** it is **optional, not a prerequisite.** The only thing it does is
 set the CPU governor to `performance` — none of the crypto needs root. `./run.sh`

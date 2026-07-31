@@ -68,6 +68,7 @@ bench/rust-tls/target/
 # copies of this .gitignore don't silently exclude the published baseline;
 # the file was originally force-added on the Pi).
 !results/rasberrypi5-20260720T143239Z.json
+!results/rasberrypi5-20260730T212145Z.json
 
 # Published 2026-07-30: Apple M4 Pro + Fedora 44 x86_64 cross-platform runs
 # (see analyze/published_runs.txt for provenance)

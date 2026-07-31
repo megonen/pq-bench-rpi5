@@ -33,6 +33,59 @@ pqb_detect_platform() {
   export PQB_OS PQB_ARCH PQB_IS_RPI PQB_RPI_MODEL
 }
 
+# ---- Linux distro family (for package-name hints and deps installs) --------
+# echoes: debian | fedora | arch | suse | unknown
+# PQB_TEST_OS_RELEASE overrides the os-release path (test hook, used to
+# exercise the per-distro output of make check on other platforms).
+pqb_linux_family() {
+  local osr="${PQB_TEST_OS_RELEASE:-/etc/os-release}" id="" like=""
+  if [ -r "$osr" ]; then
+    id="$(. "$osr" 2>/dev/null; echo "${ID:-}")"
+    like="$(. "$osr" 2>/dev/null; echo "${ID_LIKE:-}")"
+  fi
+  case " $id $like " in
+    *debian*|*ubuntu*|*raspbian*)            echo debian ;;
+    *fedora*|*rhel*|*centos*|*rocky*|*alma*) echo fedora ;;
+    *arch*)                                  echo arch ;;
+    *suse*)                                  echo suse ;;
+    *)                                       echo unknown ;;
+  esac
+}
+
+# ---- optimization-target resolution ----------------------------------------
+# Resolve THIS host's tuned build flags (the credibility anchor: identical,
+# host-tuned flags for every candidate; the resolved values go into
+# versions.lock and every results JSON):
+#   Linux aarch64 (the RPi5 target):  -O3 -mcpu=cortex-a76 / "cortex-a76"
+#   Apple-silicon macOS (uname -m is  -O3 -mcpu=native     / "apple-mN"
+#     "arm64", NOT "aarch64" — the      (label from the CPU brand string)
+#     old check missed Macs entirely
+#     and silently fell back to -O3)
+#   anything else:                    $TARGET_CFLAGS_FALLBACK / "generic-fallback"
+# Each candidate flag set is probe-compiled first; a rejected flag falls back
+# rather than failing the build. Rust harnesses mirror this via RUSTFLAGS in
+# run.sh (cortex-a76 -> target-cpu=cortex-a76, apple-m* -> target-cpu=native).
+pqb_choose_cflags() {  # sets + exports BENCH_CFLAGS, CFLAGS_TARGET
+  local cc="${CC:-cc}" tmp probe
+  tmp="$(mktemp -d)" && probe="$tmp/probe.c" && echo 'int main(void){return 0;}' > "$probe"
+  BENCH_CFLAGS="${TARGET_CFLAGS_FALLBACK:--O3}"
+  CFLAGS_TARGET="generic-fallback"
+  # shellcheck disable=SC2086
+  if [ "$PQB_OS" = "linux" ] && [ "$PQB_ARCH" = "aarch64" ] && \
+     $cc ${TARGET_CFLAGS_RPI5:--O3 -mcpu=cortex-a76} "$probe" -o "$probe.out" 2>/dev/null; then
+    BENCH_CFLAGS="${TARGET_CFLAGS_RPI5:--O3 -mcpu=cortex-a76}"
+    CFLAGS_TARGET="cortex-a76"
+  elif [ "$PQB_OS" = "macos" ] && [ "$PQB_ARCH" = "arm64" ] && \
+       $cc -O3 -mcpu=native "$probe" -o "$probe.out" 2>/dev/null; then
+    BENCH_CFLAGS="-O3 -mcpu=native"
+    local brand
+    brand="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'apple silicon')"
+    CFLAGS_TARGET="$(printf '%s' "$brand" | tr '[:upper:] ' '[:lower:]-')"
+  fi
+  rm -rf "$tmp"
+  export BENCH_CFLAGS CFLAGS_TARGET
+}
+
 # ---- friendly logging ------------------------------------------------------
 pqb_log()  { printf '\033[1;34m[pqb]\033[0m %s\n' "$*" >&2; }
 pqb_warn() { printf '\033[1;33m[pqb WARN]\033[0m %s\n' "$*" >&2; }
@@ -84,22 +137,39 @@ pqb_resolve_hostname() {
 # ---- CPU governor ----------------------------------------------------------
 # Returns 0 if it set 'performance', 1 if unavailable. Prints the governor it
 # left the system in on stdout.
+#
+# This is the ONLY privileged operation in the whole run (the sysfs governor
+# files are root-writable only), so it is the only step allowed to escalate.
+# The measurement itself runs as the invoking user — running everything under
+# sudo bit us three times (root-owned results/.work-* dirs, cargo-as-root,
+# root-owned bench/*/target artifacts). bench-run.sh caches credentials up
+# front (sudo -v) and sets PQB_GOV_SUDO=1; writes then use non-interactive
+# `sudo -n`, so a run can never stall on a mid-run password prompt.
 pqb_set_governor_performance() {
   if [ "$PQB_OS" = "linux" ] && [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; then
     local ok=1 g
     for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-      [ -w "$g" ] || { ok=0; continue; }
-      echo performance > "$g" 2>/dev/null || ok=0
+      if [ -w "$g" ]; then
+        echo performance > "$g" 2>/dev/null || ok=0
+      elif [ "${PQB_GOV_SUDO:-0}" = 1 ] && command -v sudo >/dev/null 2>&1; then
+        echo performance | sudo -n tee "$g" >/dev/null 2>&1 || ok=0
+      else
+        ok=0
+      fi
     done
     if [ "$ok" = 1 ]; then
       cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null
       return 0
     fi
-    # try cpupower as a fallback (may need sudo)
-    if command -v cpupower >/dev/null 2>&1 && cpupower frequency-set -g performance >/dev/null 2>&1; then
-      echo performance; return 0
+    # cpupower fallback, same single-step escalation rules
+    if command -v cpupower >/dev/null 2>&1; then
+      if cpupower frequency-set -g performance >/dev/null 2>&1 \
+         || { [ "${PQB_GOV_SUDO:-0}" = 1 ] && command -v sudo >/dev/null 2>&1 \
+              && sudo -n cpupower frequency-set -g performance >/dev/null 2>&1; }; then
+        echo performance; return 0
+      fi
     fi
-    pqb_warn "could not set governor to performance (need root? try: sudo ./run.sh)"
+    pqb_warn "could not set governor to performance (use 'make run' so this one step can escalate, or accept the non-baseline demerit)"
     cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown"
     return 1
   fi
@@ -180,14 +250,31 @@ pqb_throttled_active() {
 pqb_cpu_features_json() {
   local neon=false sha2=false sha3=false sha512=false aes=false pmull=false src="unknown"
   if [ "$PQB_OS" = "linux" ] && [ -r /proc/cpuinfo ]; then
-    src="/proc/cpuinfo"
-    local feats; feats="$(grep -m1 -i '^Features' /proc/cpuinfo | tr 'A-Z' 'a-z')"
-    case "$feats" in *" asimd"*|*"neon"*) neon=true;; esac
-    case "$feats" in *" sha2"*) sha2=true;; esac
-    case "$feats" in *" sha3"*) sha3=true;; esac
-    case "$feats" in *" sha512"*) sha512=true;; esac
-    case "$feats" in *" aes"*) aes=true;; esac
-    case "$feats" in *" pmull"*) pmull=true;; esac
+    # ARM /proc/cpuinfo has a 'Features' line; x86 has 'flags' instead. The
+    # grep MUST NOT propagate failure: under run.sh's `set -e -o pipefail` a
+    # missing 'Features' line (any x86 box) previously killed the whole run
+    # with no diagnostic, right after the thermal sampler started.
+    local feats
+    feats="$(grep -m1 -i '^Features' /proc/cpuinfo 2>/dev/null | tr 'A-Z' 'a-z' || true)"
+    if [ -n "$feats" ]; then
+      src="/proc/cpuinfo (Features)"
+      case "$feats" in *" asimd"*|*"neon"*) neon=true;; esac
+      case "$feats" in *" sha2"*) sha2=true;; esac
+      case "$feats" in *" sha3"*) sha3=true;; esac
+      case "$feats" in *" sha512"*) sha512=true;; esac
+      case "$feats" in *" aes"*) aes=true;; esac
+      case "$feats" in *" pmull"*) pmull=true;; esac
+    else
+      # x86: map the 1:1 equivalents from the 'flags' line (aes -> AES-NI,
+      # sha_ni -> SHA-2 instructions, pclmulqdq -> carry-less multiply).
+      # neon/sha3/sha512 stay false: they are ARM-specific extensions.
+      src="/proc/cpuinfo (flags, x86)"
+      local flags
+      flags="$(grep -m1 -i '^flags' /proc/cpuinfo 2>/dev/null | tr 'A-Z' 'a-z' || true)"
+      case "$flags" in *" aes"*) aes=true;; esac
+      case "$flags" in *" sha_ni"*) sha2=true;; esac
+      case "$flags" in *" pclmulqdq"*) pmull=true;; esac
+    fi
   elif [ "$PQB_OS" = "macos" ]; then
     src="sysctl"
     neon=true   # all Apple Silicon has NEON/ASIMD
@@ -207,18 +294,49 @@ pqb_install_build_deps() {
   if [ "$PQB_OS" = "macos" ]; then
     command -v brew >/dev/null 2>&1 || { pqb_err "Homebrew required on macOS: https://brew.sh"; return 1; }
     pqb_log "installing build deps via Homebrew"
-    brew install cmake ninja openssl@3 git python3 >/dev/null || true
+    brew install cmake ninja openssl@3.5 git python3 >/dev/null || true
   elif [ "$PQB_OS" = "linux" ]; then
-    if command -v apt-get >/dev/null 2>&1; then
-      pqb_log "installing build deps via apt"
-      local SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
-      $SUDO apt-get update -qq
-      $SUDO apt-get install -y -qq \
-        build-essential cmake ninja-build git python3 perl \
-        libssl-dev pkg-config astyle doxygen \
-        cpufrequtils util-linux >/dev/null
-    else
-      pqb_warn "no apt-get found; install cmake/ninja/gcc/libssl-dev manually"
-    fi
+    local SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+    case "$(pqb_linux_family)" in
+      debian)
+        pqb_log "installing build deps via apt (Debian family)"
+        $SUDO apt-get update -qq
+        # linux-cpupower provides the `cpupower` binary used by
+        # pqb_set_governor_performance. (Older releases shipped cpufrequtils,
+        # dropped in Debian 13/trixie — cpupower is the replacement.)
+        # libssl-dev: the openssl BINARY is not enough — liboqs/oqs-provider
+        # need headers + a linkable libcrypto (the Fedora lesson, same idea).
+        $SUDO apt-get install -y -qq \
+          build-essential cmake ninja-build git python3 perl \
+          libssl-dev pkg-config astyle doxygen \
+          linux-cpupower util-linux >/dev/null
+        ;;
+      fedora)
+        pqb_log "installing build deps via dnf (Fedora/RHEL family)"
+        # openssl-devel is the critical one: Fedora ships the openssl binary
+        # separately from the development files, and the liboqs cmake build
+        # fails with 'Could NOT find OpenSSL (missing OPENSSL_CRYPTO_LIBRARY
+        # OPENSSL_INCLUDE_DIR)' without it.
+        $SUDO dnf install -y \
+          gcc gcc-c++ make cmake ninja-build git python3 perl \
+          openssl openssl-devel pkgconf-pkg-config \
+          kernel-tools util-linux
+        ;;
+      arch)
+        pqb_warn "Arch detected (unverified platform) — install manually:"
+        echo "  sudo pacman -S --needed base-devel cmake ninja git python openssl perl" >&2
+        return 1
+        ;;
+      suse)
+        pqb_warn "openSUSE detected (unverified platform) — install manually:"
+        echo "  sudo zypper install gcc gcc-c++ make cmake ninja git python3 perl libopenssl-devel" >&2
+        return 1
+        ;;
+      *)
+        pqb_warn "unknown Linux family; install with your package manager:"
+        echo "  C compiler, make, cmake, ninja, git, python3, perl, OpenSSL development files (headers + libcrypto)" >&2
+        return 1
+        ;;
+    esac
   fi
 }

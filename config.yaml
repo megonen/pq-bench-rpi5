@@ -1,0 +1,245 @@
+# =============================================================================
+# pqc-bench candidate configuration
+#
+# This file is the single place users edit to extend the benchmark. The harness
+# reads it with a dependency-free YAML subset parser (bench/lib/miniyaml.py), so
+# keep to the simple shape used below: top-level maps, lists of scalars, and
+# lists of "- key: value" maps. Comments (#) and quotes are fine.
+#
+# Algorithm names must match liboqs / oqs-provider identifiers exactly. To see
+# what your built liboqs supports:  ./vendor/liboqs/build/tests/test_kem  (lists)
+# or check the dashboard's "available algorithms" note after a run.
+# =============================================================================
+
+# ---- measurement knobs ------------------------------------------------------
+# Default sizing is PER-OPERATION AUTO-CALIBRATION: each op (keygen/encaps/sign/
+# ...) is timed long enough to accumulate ~target_time_ms of work, clamped to
+# [min_samples, max_iters]. This makes an 18 us ML-KEM keygen and a ~750 ms
+# SLH-DSA sign both yield a stable median without a hand-tuned per-alg count:
+#   - fast ops are bounded by max_iters
+#   - slow ops are bounded by min_samples (so even ~1 op per target still gets
+#     enough samples for a stable median/MAD)
+# To force FIXED counts instead, pass `./run.sh --iters N` — that disables
+# calibration and uses the warmup_iters/timed_iters fallback below.
+measurement:
+  target_time_ms: 250       # auto: aggregate timed work to put on each op
+  min_samples: 30           # auto: floor on timed iters/rep (stable median+MAD)
+  max_iters: 20000          # auto: ceiling on timed iters/rep (caps fast ops)
+  repetitions: 5            # independent repetitions (fresh process each time)
+  cycles_mode: auto         # auto | on | off  (PMU userspace cycle counting)
+  # ---- fixed-count fallback (only used when ./run.sh --iters is given) ----
+  warmup_iters: 1000        # untimed iterations to settle caches/branch predictors
+  timed_iters: 10000        # timed iterations per repetition
+
+# ---- security_level (NIST category) ----------------------------------------
+# Every candidate carries `security_level: N` — the NIST PQC category the
+# parameter set targets (1/2/3/5) — used only to group algorithms on the charts.
+# The mapping is PER-SCHEME, so different schemes reach the same security target
+# with different-looking sets: a level 1 sitting next to a level 2 is the real
+# NIST categorization, not a typo. Notably:
+#   - ML-KEM-512, Falcon-512, X25519         -> Category 1
+#   - ML-DSA-44                              -> Category 2  (FIPS 204 defines NO
+#                                               Category-1 ML-DSA; -44 is its
+#                                               smallest set and lands at Cat 2)
+#   - ML-KEM-768  / ML-DSA-65                -> Category 3
+#   - ML-KEM-1024 / ML-DSA-87 / Falcon-1024  -> Category 5
+# (NIST levels: 1 ~ AES-128, 2 ~ SHA-256 collision, 3 ~ AES-192, 5 ~ AES-256.)
+
+# ---- KEMs ------------------------------------------------------------------
+# baseline = the classical reference Logos uses TODAY (drawn on every chart).
+kem:
+  baseline:
+    - name: X25519
+      classical: true
+      security_level: 1     # NIST category (see "security_level" note above)
+  candidates:
+    - name: ML-KEM-512
+      security_level: 1
+    - name: ML-KEM-768
+      security_level: 3
+    - name: ML-KEM-1024
+      security_level: 5
+    # Hybrids (classical + PQ) — these are oqs-provider TLS group names; for the
+    # raw KEM bench they are skipped unless liboqs exposes them as a KEM.
+    - name: X25519MLKEM768
+      security_level: 3
+      hybrid: true
+    - name: SecP256r1MLKEM768
+      security_level: 3
+      hybrid: true
+    # --- Code-based + conservative-LWE backup candidates (added 2026-06) -------
+    # Verified enabled in the linked liboqs 0.15.0 build via OQS_KEM_alg_is_enabled
+    # (oqsconfig.h + runtime cross-check). Keygen/encaps/decaps are reported as
+    # separate ops so the docs' "keygen is a one-time setup cost" argument can show
+    # the (slow) McEliece keygen explicitly next to its tiny ciphertext.
+    #
+    # Classic McEliece — code-based. Huge public key, TINY ciphertext, very slow
+    # keygen on the Pi (auto-calibration clamps keygen to min_samples=30, like
+    # SLH-DSA sign); encaps/decaps are fast and calibrate normally. Standard sets,
+    # plus the 460896f fast-keygen variant directly next to standard 460896: same
+    # params and same tiny ciphertext but a faster keygen, so the pair gives the
+    # keygen trade-off directly (the most useful McEliece data point for the
+    # migration doc). Other f-variants omitted as redundant.
+    - name: Classic-McEliece-348864
+      security_level: 1
+    - name: Classic-McEliece-460896
+      security_level: 3
+    - name: Classic-McEliece-460896f
+      security_level: 3
+    - name: Classic-McEliece-6688128
+      security_level: 5
+    - name: Classic-McEliece-6960119
+      security_level: 5
+    - name: Classic-McEliece-8192128
+      security_level: 5
+    # FrodoKEM — conservative (unstructured) LWE. ~100x slower encaps/decaps than
+    # ML-KEM and ~15x larger ciphertext. AES variant (uses ARM AES instructions,
+    # which this build compiles in); SHAKE variants also available if needed.
+    - name: FrodoKEM-640-AES
+      security_level: 1
+    - name: FrodoKEM-976-AES
+      security_level: 3
+    - name: FrodoKEM-1344-AES
+      security_level: 5
+    # FrodoKEM SHAKE variants — same algorithm and arithmetic as the AES rows,
+    # different symmetric primitive (SHAKE via the OQS SHA-3 layer instead of
+    # AES via OpenSSL EVP). Added as the controlled test of the companion
+    # document's claim that the M3's FrodoKEM lead comes from hardware AES:
+    # if the AES rows show a large cross-platform gap while these SHAKE rows
+    # sit near the portable-C norm, the AES attribution is isolated; if both
+    # move together, the cause is elsewhere.
+    - name: FrodoKEM-640-SHAKE
+      security_level: 1
+    - name: FrodoKEM-976-SHAKE
+      security_level: 3
+    - name: FrodoKEM-1344-SHAKE
+      security_level: 5
+    # HQC-128/192/256: NOT enabled in this liboqs 0.15.0 build (disabled upstream
+    # after the IND-CCA2 implementation issue; oqsconfig.h has it #undef and the
+    # runtime OQS_KEM_alg_is_enabled returns 0). Intentionally omitted rather than
+    # listed-and-disabled. Re-add once linked against a liboqs with HQC re-enabled.
+
+# ---- Signatures ------------------------------------------------------------
+sig:
+  baseline:
+    - name: Ed25519
+      classical: true
+      security_level: 1
+  candidates:
+    - name: ML-DSA-44
+      security_level: 2     # Cat 2, not 1 — FIPS 204 has no Cat-1 ML-DSA (see note above)
+    - name: ML-DSA-65
+      security_level: 3
+    - name: ML-DSA-87
+      security_level: 5
+    - name: Falcon-512
+      security_level: 1
+    - name: Falcon-1024
+      security_level: 5
+    # Hash-based signatures — BOTH generations measured side by side:
+    #
+    # SLH-DSA (FIPS 205 final, "pure" variants) — the standardised algorithm.
+    # Identifiers verified by instantiating them in the vendored liboqs 0.15.0
+    # build (claimed NIST levels 1/1/3/5 confirmed at runtime). liboqs 0.16.0
+    # removes SPHINCS+ entirely, so these are also the forward-compatible rows.
+    - name: SLH_DSA_PURE_SHA2_128F
+      security_level: 1
+    - name: SLH_DSA_PURE_SHA2_128S
+      security_level: 1
+    - name: SLH_DSA_PURE_SHA2_192F
+      security_level: 3
+    - name: SLH_DSA_PURE_SHA2_256F
+      security_level: 5
+    # SPHINCS+ (round-3 "simple" sets) — a DIFFERENT algorithm from FIPS 205
+    # SLH-DSA, not a relabelling. Kept alongside so (a) new runs compare
+    # directly against the three published RPi5 baselines that measured these,
+    # and (b) the TLS matrix's oqs-provider `sphincssha2128fsimple` cell keeps
+    # a matching primitive row for its handshake_primitive_sum. Will drop when
+    # we move to liboqs 0.16.0 (which removes SPHINCS+).
+    - name: SPHINCS+-SHA2-128f-simple
+      security_level: 1
+    - name: SPHINCS+-SHA2-128s-simple
+      security_level: 1
+    - name: SPHINCS+-SHA2-192f-simple
+      security_level: 3
+    - name: SPHINCS+-SHA2-256f-simple
+      security_level: 5
+    # --- extend here ---
+
+# ---- TLS 1.3 handshake matrix ----------------------------------------------
+# Two implementations, both full TLS 1.3 handshakes over the same in-process
+# harness (bench_tls.c):
+#   openssl-native : OpenSSL >= 3.5's own PQC (production-relevant path); the
+#                    harness ASSERTS no OQS provider is loaded for these rows.
+#   oqs-provider   : liboqs algorithms via the experimental provider; the only
+#                    way to get an SLH-DSA TLS row today (IETF codepoints for
+#                    SLH-DSA in TLS 1.3 are still draft, so native OpenSSL can
+#                    issue SLH-DSA certs but cannot negotiate them).
+# Every cell carries phase: baseline (classical KEM + classical sig),
+# phase0 (PQ/hybrid KEM + classical sig — HNDL protection), phase2 (PQ sig).
+# The classical baseline pair is ALWAYS included, measured natively.
+tls:
+  baseline:
+    kem_group: X25519
+    sig_alg: ed25519        # OpenSSL classical auth Logos uses today
+  connections: 1000         # handshakes per cell
+
+  # ---- openssl-native matrix (group/sig names are OpenSSL's own) ----------
+  native:
+    hybrid_groups:
+      - X25519MLKEM768
+      - SecP256r1MLKEM768
+    pure_groups:
+      - MLKEM512
+      - MLKEM768
+      - MLKEM1024
+    classical_sig: ed25519  # phase0 rows (and the baseline cert)
+    # phase2 = X25519MLKEM768 + pure_groups x pq_sigs. SecP256r1MLKEM768 is
+    # phase0-only by design (Ed25519 is our classical signature; no ECDSA).
+    pq_sigs:
+      - ML-DSA-44
+      - ML-DSA-65
+      - ML-DSA-87
+
+  # ---- rustls + aws-lc-rs matrix (implementation: rustls-awslc) -----------
+  # The Rust TLS stack, same phase structure. Coverage facts (recorded as
+  # enabled:false rows, not hidden): rustls 0.23 has no MLKEM512 group, and
+  # SLH-DSA is absent from rustls/aws-lc-rs entirely — so across BOTH
+  # production stacks SLH-DSA in TLS exists only in the experimental
+  # oqs-provider. ML-DSA rows ride UNSTABLE cargo features
+  # (rustls-post-quantum/aws-lc-rs-unstable) and carry unstable_features:true.
+  rustls:
+    hybrid_groups:
+      - X25519MLKEM768
+      - SecP256r1MLKEM768
+    pure_groups:
+      - MLKEM512
+      - MLKEM768
+      - MLKEM1024
+    classical_sig: ed25519
+    pq_sigs:
+      - ML-DSA-44
+      - ML-DSA-65
+      - ML-DSA-87
+
+  # ---- oqs-provider matrix (oqs-provider TLS group/sig names) -------------
+  # Kept in full: the ML-DSA cells overlap with the native matrix on purpose
+  # (same protocol + algorithms under two stacks isolates provider overhead),
+  # and the falcon/sphincs cells exist ONLY here.
+  kem_groups:
+    - X25519MLKEM768
+    - SecP256r1MLKEM768
+    - mlkem512
+    - mlkem768
+    - mlkem1024
+  sig_algs:
+    - mldsa44
+    - mldsa65
+    - mldsa87
+    - falcon512
+    - sphincssha2128fsimple
+
+# ---- future phase (NOT implemented now — hooks only) -----------------------
+# zk:
+#   snark: []   # e.g. groth16, plonk, halo2
+#   stark: []   # e.g. risc0, winterfell

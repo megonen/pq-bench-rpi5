@@ -1,0 +1,76 @@
+# Build trees / vendored deps (rebuilt by setup/setup.sh)
+/vendor/
+/build/
+setup/versions.lock
+
+# Compiled harness binaries
+bench/kem_sig/bench_pq
+bench/tls/bench_tls
+*.o
+
+# Generated TLS material
+bench/tls/pki/
+
+# Per-run scratch dirs (intermediate artifacts; never committed)
+results/.work-*/
+
+# Local results are kept by users, not committed by default.
+# Comment the next line out if you DO want to commit your machine's results.
+results/*.json
+!results/example-*.json
+# Published baseline-grade RPi5 run (auto-calibrated full run)
+!results/rasberrypi5-20260608T223040Z.json
+# Baseline-grade RPi5 run adding the code-based + conservative-LWE KEMs
+# (Classic McEliece + FrodoKEM); kept as its own file, baseline above untouched.
+!results/rasberrypi5-20260614T205226Z.json
+# Mac (Apple M3) cross-platform run: apple-m3-optimized from-source liboqs,
+# KEM/sig reps=5 (same auto-calibrate regime as the Pi). NOT baseline-grade
+# (unpinned, no governor) by design; provenance self-stamped in the JSON. Kept
+# as its own file for the tuned-vs-portable comparison; Pi baselines untouched.
+!results/mehmetmac-20260624T140033Z.json
+# Consolidated baseline-grade RPi5 run (KEM + sig + TLS in one pass); supersedes
+# the two older split files (0614 KEM/sig + 0608 TLS) as the single Pi baseline.
+!results/rasberrypi5-20260625T202356Z.json
+
+# Merged dataset consumed by the dashboard. Tracked: ships the published RPi5
+# baseline so a fresh clone renders charts out-of-the-box. Contributors who
+# re-merge overwrite it locally (modified file they can commit or discard).
+analyze/png/
+
+# Python venv (matplotlib lives here; system python stays clean)
+analyze/.venv/
+
+# Machine-local Claude Code settings (never shared)
+.claude/settings.local.json
+
+# Python / OS cruft
+__pycache__/
+*.pyc
+.DS_Store
+# Consolidated Mac (Apple M3) run in the published Logos snapshot; cited by the
+# companion document's provenance section (supersedes 20260624T140033Z, which
+# was KEM/sig only — no TLS cells).
+!results/mehmetmac-20260625T220618Z.json
+# Community RPi5 run cited by the companion document (file to be added).
+!results/thomas-pi-20260703T083302Z.json
+
+# Rust harness build tree (bench/rust — Cargo.lock IS committed)
+bench/rust/target/
+
+# rustls TLS harness build tree (bench/rust-tls — Cargo.lock IS committed)
+bench/rust-tls/target/
+# Consolidated schema-2.0.0 Mac (Apple M3) run: all four measurement groups
+# (liboqs, rustcrypto+dalek, aws-lc-rs pricing rows, three-stack TLS phase
+# matrix), apple-m3 tuned build. Not yet in published_runs.txt — the published
+# set flips wholesale once the Pi companion run exists.
+!results/mehmetmac-20260719T224937Z.json
+# Consolidated schema-2.0.0 RPi5 baseline run (whitelisted here so snapshot
+# copies of this .gitignore don't silently exclude the published baseline;
+# the file was originally force-added on the Pi).
+!results/rasberrypi5-20260720T143239Z.json
+!results/rasberrypi5-20260730T212145Z.json
+
+# Published 2026-07-30: Apple M4 Pro + Fedora 44 x86_64 cross-platform runs
+# (see analyze/published_runs.txt for provenance)
+!results/Mac-20260730T134951Z.json
+!results/fedora-20260730T120637Z.json

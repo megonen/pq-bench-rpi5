@@ -1,0 +1,46 @@
+# Published dashboard dataset — the ONLY results files merged into
+# dashboard/data/merged.json when analyze/merge.py runs without arguments.
+#
+# Membership criterion: the file is in the published Logos snapshot and cited
+# by the companion document's provenance section — NOT merely git-tracked here.
+# Paths are relative to results/. Publishing a new run = adding a line here
+# (and un-ignoring the file in .gitignore); dev/smoke runs sitting in results/
+# never leak into the published dataset by accident.
+#
+# ---- current generation (schema 2.0.0: four measurement groups, three-stack
+# ---- TLS phase matrix, SLH-DSA + SPHINCS+ side by side, Frodo AES+SHAKE) ----
+#
+# Consolidated baseline-grade RPi5 run (cortex-a76, OpenSSL 3.5.6, 1692 s,
+# no throttling, zero warnings; first baseline produced by the narrowed-sudo
+# runner — measurement as the user, only the governor write escalated.
+# Supersedes rasberrypi5-20260720T143239Z (same machine, same coverage;
+# medians agree within ±0.2% primitives / ±0.6% TLS — retired below):
+rasberrypi5-20260730T212145Z.json
+# Consolidated Mac (Apple M3) cross-platform run (apple-m3 / -mcpu=native,
+# OpenSSL 3.5.7; NOT baseline-grade by design — dashboard hides it by default):
+mehmetmac-20260719T224937Z.json
+# Apple M4 Pro cross-platform run (apple-m4-pro / -mcpu=native, OpenSSL 3.5.7,
+# macOS 26.6; full four-group + three-stack coverage; NOT baseline-grade):
+Mac-20260730T134951Z.json
+# Fedora 44 x86_64 run (Intel Core Ultra 9 285HX, generic-fallback flags,
+# system OpenSSL 3.5.7, governor=performance + pinned via the narrowed-sudo
+# path; NOT baseline-grade: non-Pi host, untuned flags. First x86 datapoint —
+# also validates the x86 cpu-features path in production):
+fedora-20260730T120637Z.json
+#
+# ---- retired (schema 1.0.0 generation; files kept in the repo as history) ----
+# NB: rasberrypi5-20260614T205226Z.json additionally serves as the
+# schema-1.0.0 COMPATIBILITY FIXTURE for `make test` (hygiene test 5 in
+# scripts/selftest.sh exercises merge.py's v1 handling against it) — do NOT
+# delete it when tidying retired results.
+# rasberrypi5-20260720T143239Z: superseded by the 20260730 re-run above —
+# identical machine and coverage, re-measured under the narrowed-sudo runner
+# to verify it changes nothing (it doesn't); kept as history.
+# The old published set (rasberrypi5-20260625T202356Z, mehmetmac-20260625T220618Z,
+# thomas-pi-20260703T083302Z) predates the SLH-DSA rename and measures none of:
+# the RustCrypto/aws-lc-rs groups, the native/rustls TLS phase matrix, or the
+# FrodoKEM-SHAKE variants — merged next to current-generation runs those files
+# would render mostly blank and their SLH-DSA-labelled rows would silently mean
+# a different algorithm (round-3 SPHINCS+ vs FIPS 205). Thomas's run is retired
+# for the same reason, not for any quality problem — we will ask for a re-run
+# with the new harness and re-list it then.
